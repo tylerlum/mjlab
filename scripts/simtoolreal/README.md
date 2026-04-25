@@ -74,6 +74,28 @@ uv run --extra cu128 python -m mjlab.scripts.train \
   Mjlab-SimToolReal-Iiwa-Sharpa-SimpleCuboid
 ```
 
+Selectable backend entrypoint:
+
+```bash
+# RSL-RL through the original MJLab task registry path
+uv run --extra cu128 python -m mjlab.scripts.train_simtoolreal \
+  --backend rsl_rl --num-envs 1024
+
+# Vendored simple_rl PPO or SAPG
+uv run --extra cu128 python -m mjlab.scripts.train_simtoolreal \
+  --backend simple_rl --alt.algorithm ppo --num-envs 1024
+uv run --extra cu128 python -m mjlab.scripts.train_simtoolreal \
+  --backend simple_rl --alt.algorithm sapg --num-envs 1020
+
+# Vendored rl_games PPO or SAPG
+uv run --extra cu128 python -m mjlab.scripts.train_simtoolreal \
+  --backend rl_games --alt.algorithm ppo --num-envs 1024
+uv run --extra cu128 python -m mjlab.scripts.train_simtoolreal \
+  --backend rl_games --alt.algorithm sapg --num-envs 1020
+```
+
+For SAPG, `num-envs` must be divisible by `--alt.sapg-blocks` (default 6).
+
 What is currently ported:
 
 - Source SimToolReal KUKA iiwa14 + left SHARPA URDF robot, not the website XML.
@@ -87,8 +109,10 @@ What is currently ported:
   also updates `geom_rbound` and `geom_aabb` for Warp.
 - First-pass lifting, keypoint-progress, success, velocity, fall, distance, and
   timeout terms.
-- RSL-RL PPO runner config as a runnable baseline while `rl_games`/`simple_rl`
-  SAPG integration is still pending.
+- RSL-RL PPO runner config as a runnable baseline.
+- Vendored copies of `simple_rl` and the private `rl_games` fork from
+  `simtoolreal_private`, with wrappers that expose the MJLab manager env to each
+  trainer. Tiny PPO and SAPG smoke runs pass for both alternate backends.
 
 ## Important Parity Risks
 
@@ -105,9 +129,9 @@ What is currently ported:
   different-mesh-per-world API in this pass.
 - Object scaling is implemented for primitive boxes. If mesh objects are added,
   scaling/contact bounds need to be validated separately.
-- The RSL-RL config is only a baseline runner path. The original SimToolReal
-  results used `rl_games`/SAPG, so reproducing paper-level results still needs
-  the `rl_games` or `simple_rl` runner path plus matching hyperparameters.
+- The RSL-RL config is only a baseline runner path. The vendored `rl_games` and
+  `simple_rl` backends now run, but their hyperparameters are still compact
+  bridge defaults rather than the full original SimToolReal YAML.
 - The current harness uses the website MuJoCo XML directly. That is good for
   physics parity with the browser demo, but it bypasses MJLab manager-based reset,
   reward, termination, and vectorization code.

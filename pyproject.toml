@@ -47,6 +47,12 @@ dependencies = [
   "tensordict",
   "rsl-rl-lib==5.0.1",
   "tensorboard>=2.20.0",
+  "tensorboardX>=2.6.4",
+  "gym>=0.26.2",
+  "omegaconf>=2.3.0",
+  "pyyaml>=6.0",
+  "psutil>=5.9.0",
+  "setproctitle>=1.2.2",
   "onnxscript>=0.5.4",
   "wandb>=0.22.3",
 ]
@@ -57,6 +63,7 @@ dependencies = [
 
 [project.scripts]
 train = "mjlab.scripts.train:main"
+train-simtoolreal = "mjlab.scripts.train_simtoolreal:main"
 play = "mjlab.scripts.play:main"
 demo = "mjlab.scripts.demo:main"
 list-envs = "mjlab.scripts.list_envs:main"
@@ -142,6 +149,8 @@ mujoco-warp = { git = "https://github.com/google-deepmind/mujoco_warp", rev = "e
 src = ["src"]  # Helpful for recognizing first-party imports.
 indent-width = 2
 exclude = [
+  "src/rl_games",
+  "src/simple_rl",
   "src/mjlab/utils/lab_api",
   "typings",
 ]
@@ -154,7 +163,13 @@ ignore = ["B011"]
 pythonVersion = "3.10"
 venvPath = "."
 venv = ".venv"
-ignore = ["./typings", "./src/mjlab/utils/lab_api", "./docs"]
+ignore = [
+  "./typings",
+  "./src/mjlab/utils/lab_api",
+  "./src/rl_games",
+  "./src/simple_rl",
+  "./docs",
+]
 stubPath = "typings"
 
 [tool.ty.environment]
@@ -162,7 +177,7 @@ extra-paths = ["typings"]
 
 [tool.ty.src]
 include = ["src", "tests"]
-exclude = ["src/mjlab/utils/lab_api", "typings"]
+exclude = ["src/mjlab/utils/lab_api", "src/rl_games", "src/simple_rl", "typings"]
 
 [tool.pytest.ini_options]
 markers = [
