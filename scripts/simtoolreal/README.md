@@ -41,10 +41,11 @@ last_action_minmax=(-1.000000, 1.000000)
 ```
 
 The policy moves the object toward the goal, so ONNX inference, recurrent state,
-observation construction, and action filtering are live. This is not yet a full
-MJLab task or training environment.
+observation construction, and action filtering are live. This remains the
+single-env parity reference for the manager-based MJLab task below.
 
-The reusable implementation lives in `src/mjlab/tasks/simtoolreal/`:
+The reusable browser-reference implementation lives in
+`src/mjlab/tasks/simtoolreal/`:
 
 - `policy.py`: browser-demo observation construction, ONNX inference, and action
   filtering.
@@ -52,18 +53,64 @@ The reusable implementation lives in `src/mjlab/tasks/simtoolreal/`:
   pretrained-policy stepping, and reward diagnostics. This is the parity harness
   for the later vectorized MJLab/Warp MDP.
 
+## Manager-Based MJLab/Warp Environment
+
+The initial vectorized training task is registered as:
+
+```text
+Mjlab-SimToolReal-Iiwa-Sharpa-SimpleCuboid
+```
+
+Smoke test:
+
+```bash
+uv run --extra cu128 pytest -q tests/test_simtoolreal_manager_env.py
+```
+
+Training entrypoint:
+
+```bash
+uv run --extra cu128 python -m mjlab.scripts.train \
+  Mjlab-SimToolReal-Iiwa-Sharpa-SimpleCuboid
+```
+
+What is currently ported:
+
+- Source SimToolReal KUKA iiwa14 + left SHARPA URDF robot, not the website XML.
+- Fixed narrow table primitive under the object, matching the source task's
+  table dimensions and nominal surface height.
+- 29-dimensional SimToolReal joint position action transform with separate arm
+  relative control and hand absolute target smoothing.
+- 140-dimensional observation tensor matching the browser-policy shape.
+- Vectorized object and goal resets with per-env origin offsets.
+- Primitive cuboid object size randomization through MJLab `dr.geom_size`, which
+  also updates `geom_rbound` and `geom_aabb` for Warp.
+- First-pass lifting, keypoint-progress, success, velocity, fall, distance, and
+  timeout terms.
+- RSL-RL PPO runner config as a runnable baseline while `rl_games`/`simple_rl`
+  SAPG integration is still pending.
+
 ## Important Parity Risks
 
-- Observation ordering currently follows the WASM demo, not the IsaacGym
-  `obsList` order verbatim. The deployed ONNX was built for this path, so this is
-  correct for browser-policy reproduction but must be rechecked for `.pth`
-  checkpoints through `rl_games` or `simple_rl`.
+- The manager environment observation ordering currently follows the WASM demo,
+  not the IsaacGym `obsList` order verbatim. The deployed ONNX was built for this
+  path, so this is correct for browser-policy reproduction but must be rechecked
+  for `.pth` checkpoints through `rl_games` or `simple_rl`.
+- The manager environment uses the source URDF and MJLab builtin position
+  actuators. The browser harness uses the website MuJoCo XML. Joint names and
+  kinematic body names now come from the IsaacGym/URDF path, but actuator gains,
+  contact settings, inertias, and geom simplifications still need parity audits.
+- The task currently starts with one primitive cuboid distribution from
+  `simtoolreal_private`. I did not find an obvious same-scene,
+  different-mesh-per-world API in this pass.
+- Object scaling is implemented for primitive boxes. If mesh objects are added,
+  scaling/contact bounds need to be validated separately.
+- The RSL-RL config is only a baseline runner path. The original SimToolReal
+  results used `rl_games`/SAPG, so reproducing paper-level results still needs
+  the `rl_games` or `simple_rl` runner path plus matching hyperparameters.
 - The current harness uses the website MuJoCo XML directly. That is good for
   physics parity with the browser demo, but it bypasses MJLab manager-based reset,
   reward, termination, and vectorization code.
-- The object is the browser demo hammer-like primitive, with fixed scales
-  `[5.0, 0.75, 0.5]`. MJLab has primitive `geom_size` domain randomization, but I
-  did not find an obvious same-scene, different-mesh-per-world API in this pass.
 - The rollout success metric is only final object-goal position distance. The
   SimToolReal MDP also uses keypoint pose errors, lifting rewards, action
   penalties, success windows, resets, random impulses, object distributions, and
@@ -76,13 +123,14 @@ The reusable implementation lives in `src/mjlab/tasks/simtoolreal/`:
 
 ## Next Implementation Steps
 
-1. Copy the browser-policy observation/action code into MJLab task modules with
-   tests that compare against this harness on a saved MuJoCo state.
-2. Build a manager-based `Mjlab-SimToolReal-Iiwa-Sharpa` environment around the
-   same robot/object model, initially with one primitive object and no mesh
-   swapping.
-3. Port reset sampling, goal sampling, reward terms, success logic, and
-   terminations from `simtoolreal/isaacgymenvs/tasks/simtoolreal/env.py`.
+1. Audit every manager MDP tensor against `simtoolreal/isaacgymenvs/tasks/
+   simtoolreal/env.py`, especially observation ordering, fingertip frames, reward
+   scales, reset windows, and success/lift state transitions.
+2. Add saved-state parity tests between the browser harness, source MuJoCo/URDF
+   env, and manager-based MJLab env for keypoints, palm/fingertip positions, and
+   action target filtering.
+3. Add the original random impulses, richer object distributions, physics/domain
+   randomization, and curriculum terms once the simple-cuboid MDP is stable.
 4. Decide whether training should use the original `rl_games` SAPG path or the
-   cleaner `simple_rl` implementation from `simtoolreal_private`, then add a
-   wrapper only after the MDP tensors match.
+   cleaner `simple_rl` implementation from `simtoolreal_private`, then add that
+   runner after the MDP tensors match.
