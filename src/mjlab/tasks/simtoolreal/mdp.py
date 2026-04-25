@@ -115,6 +115,9 @@ def _state(env: ManagerBasedRlEnv) -> dict[str, torch.Tensor]:
       ),
       "near_goal_steps": torch.zeros(env.num_envs, device=env.device),
       "lifted_object": torch.zeros(env.num_envs, device=env.device, dtype=torch.bool),
+      "just_lifted_object": torch.zeros(
+        env.num_envs, device=env.device, dtype=torch.bool
+      ),
       "initial_object_z": torch.full((env.num_envs,), 0.545, device=env.device),
     }
   return env._simtoolreal_state  # type: ignore[attr-defined]
@@ -219,6 +222,7 @@ def reset_simtoolreal_state(env: ManagerBasedRlEnv, env_ids: torch.Tensor | None
   state["closest_keypoint_max_dist"][env_ids] = float("inf")
   state["near_goal_steps"][env_ids] = 0.0
   state["lifted_object"][env_ids] = False
+  state["just_lifted_object"][env_ids] = False
 
 
 def reset_object_uniform(
@@ -422,20 +426,41 @@ def lifting_reward(env: ManagerBasedRlEnv) -> torch.Tensor:
   kin = _simtoolreal_kinematics(env)
   state = _state(env)
   z_lift = 0.05 + kin["object_pos"][:, 2] - state["initial_object_z"]
-  lifted = state["lifted_object"] | (z_lift > 0.15)
+  was_lifted = state["lifted_object"].clone()
+  lifted = was_lifted | (z_lift > 0.15)
+  state["just_lifted_object"][:] = lifted & ~was_lifted
+  state["lifted_object"][:] = lifted
   return torch.clamp(z_lift, 0.0, 0.5) * (~lifted)
 
 
+def lifting_bonus_reward(env: ManagerBasedRlEnv, bonus: float = 300.0) -> torch.Tensor:
+  return bonus * _state(env)["just_lifted_object"].float()
+
+
 def success_bonus(
-  env: ManagerBasedRlEnv, tolerance: float = 0.01, steps: int = 5
+  env: ManagerBasedRlEnv,
+  tolerance: float = 0.075,
+  keypoint_scale: float = 1.5,
+  steps: int = 10,
+  reach_goal_bonus: float = 1000.0,
 ) -> torch.Tensor:
   kin = _simtoolreal_kinematics(env)
   state = _state(env)
-  near = kin["keypoint_max_dist"] <= tolerance
-  state["near_goal_steps"][:] = torch.where(
-    near, state["near_goal_steps"] + 1.0, torch.zeros_like(state["near_goal_steps"])
-  )
-  return (state["near_goal_steps"] >= steps).float()
+  near = kin["keypoint_max_dist"] <= tolerance * keypoint_scale
+  state["near_goal_steps"] += near.float()
+  return near.float() * (reach_goal_bonus / steps)
+
+
+def kuka_action_penalty(
+  env: ManagerBasedRlEnv, scale: float = 0.03
+) -> torch.Tensor:
+  return -scale * torch.sum(torch.abs(_robot(env).data.joint_vel[:, :7]), dim=-1)
+
+
+def hand_action_penalty(
+  env: ManagerBasedRlEnv, scale: float = 0.003
+) -> torch.Tensor:
+  return -scale * torch.sum(torch.abs(_robot(env).data.joint_vel[:, 7:N_ACT]), dim=-1)
 
 
 def object_velocity_penalty(env: ManagerBasedRlEnv) -> torch.Tensor:
@@ -461,7 +486,7 @@ def hand_far_from_object(env: ManagerBasedRlEnv, threshold: float = 1.5) -> torc
 
 
 def goal_reached(
-  env: ManagerBasedRlEnv, tolerance: float = 0.01, steps: int = 5
+  env: ManagerBasedRlEnv, tolerance: float = 0.075, steps: int = 10
 ) -> torch.Tensor:
   del tolerance
   state = _state(env)

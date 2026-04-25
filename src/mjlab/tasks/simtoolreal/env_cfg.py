@@ -71,10 +71,13 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   }
 
   rewards = {
-    "lift": RewardTermCfg(func=mdp.lifting_reward, weight=3.0),
-    "keypoint_delta": RewardTermCfg(func=mdp.keypoint_delta_reward, weight=60.0),
-    "success": RewardTermCfg(func=mdp.success_bonus, weight=250.0),
-    "object_velocity": RewardTermCfg(func=mdp.object_velocity_penalty, weight=0.01),
+    "lift": RewardTermCfg(func=mdp.lifting_reward, weight=20.0),
+    "lift_bonus": RewardTermCfg(func=mdp.lifting_bonus_reward, weight=1.0),
+    "keypoint_delta": RewardTermCfg(func=mdp.keypoint_delta_reward, weight=200.0),
+    "success": RewardTermCfg(func=mdp.success_bonus, weight=1.0),
+    "kuka_action_penalty": RewardTermCfg(func=mdp.kuka_action_penalty, weight=1.0),
+    "hand_action_penalty": RewardTermCfg(func=mdp.hand_action_penalty, weight=1.0),
+    "object_velocity": RewardTermCfg(func=mdp.object_velocity_penalty, weight=0.0),
   }
 
   terminations = {
