@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import contextlib
+import io
+import os
+import warnings
+from dataclasses import dataclass, field, replace
 
 import tyro
 
@@ -15,8 +19,6 @@ from mjlab.rl.simtoolreal_backend_cfg import (
   make_rl_games_config,
   make_simple_rl_configs,
 )
-from mjlab.scripts.train import TrainConfig, launch_training
-from mjlab.tasks.registry import load_env_cfg
 
 TASK_ID = "Mjlab-SimToolReal-Iiwa-Sharpa-SimpleCuboid"
 
@@ -37,12 +39,30 @@ class SimToolRealTrainCli:
 
 
 def _run_rsl_rl(cfg: SimToolRealTrainCli) -> None:
+  from mjlab.scripts.train import TrainConfig, launch_training
+
   args = TrainConfig.from_task(TASK_ID)
   args.env.scene.num_envs = cfg.num_envs
   launch_training(task_id=TASK_ID, args=args)
 
 
+def _normalize_alt_cfg(cfg: SimToolRealTrainCli) -> SimToolRealTrainCli:
+  alt = replace(cfg.alt, backend=cfg.backend)
+  num_envs = cfg.num_envs
+  if cfg.backend in ("simple_rl", "rl_games") and alt.algorithm == "sapg":
+    remainder = num_envs % alt.sapg_blocks
+    if remainder:
+      num_envs += alt.sapg_blocks - remainder
+      print(
+        f"[SimToolReal] Adjusted num_envs to {num_envs} so SAPG can split "
+        f"evenly across {alt.sapg_blocks} blocks."
+      )
+  return replace(cfg, num_envs=num_envs, alt=alt)
+
+
 def _make_env(cfg: SimToolRealTrainCli) -> ManagerBasedRlEnv:
+  from mjlab.tasks.registry import load_env_cfg
+
   env_cfg = load_env_cfg(TASK_ID)
   env_cfg.scene.num_envs = cfg.num_envs
   return ManagerBasedRlEnv(cfg=env_cfg, device=cfg.device)
@@ -87,9 +107,17 @@ def _run_rl_games(cfg: SimToolRealTrainCli) -> None:
 
 
 def main() -> None:
-  import mjlab.tasks  # noqa: F401
+  warnings.filterwarnings(
+    "ignore",
+    message="`torch.cuda.amp.*` is deprecated.*",
+    category=FutureWarning,
+  )
+  cfg = _normalize_alt_cfg(tyro.cli(SimToolRealTrainCli))
+  os.environ.setdefault("ORT_LOGGING_LEVEL", "3")
+  os.environ.setdefault("ONNXRUNTIME_LOG_SEVERITY_LEVEL", "3")
+  with contextlib.redirect_stderr(io.StringIO()):
+    import mjlab.tasks  # noqa: F401
 
-  cfg = tyro.cli(SimToolRealTrainCli)
   if cfg.backend == "rsl_rl":
     _run_rsl_rl(cfg)
   elif cfg.backend == "simple_rl":

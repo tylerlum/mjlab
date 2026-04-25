@@ -1,20 +1,25 @@
 """Backend configs and wrappers for SimToolReal training runners."""
+# ruff: noqa: E402, I001
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import contextlib
+import io
 from pathlib import Path
 from typing import Literal
 
-import gym
+with contextlib.redirect_stderr(io.StringIO()):
+  import gym
 import numpy as np
 import torch
 
 from mjlab.envs import ManagerBasedRlEnv
-from mjlab.tasks.simtoolreal.mdp import N_ACT, N_OBS
 
 BackendName = Literal["rsl_rl", "simple_rl", "rl_games"]
 AlgorithmName = Literal["ppo", "sapg"]
+N_ACT = 29
+N_OBS = 140
 
 
 @dataclass(kw_only=True)
@@ -24,20 +29,37 @@ class SimToolRealAltRunnerCfg:
   backend: BackendName = "rsl_rl"
   algorithm: AlgorithmName = "ppo"
   experiment_dir: Path = Path("logs/simtoolreal_alt")
-  max_epochs: int = 1
-  horizon_length: int = 32
+  max_epochs: int = 1_000_000
+  max_frames: int = 100_000_000_000_000
+  horizon_length: int = 16
   minibatch_size: int | None = None
-  mini_epochs: int = 5
-  learning_rate: float = 3.0e-4
-  gamma: float = 0.995
+  mini_epochs: int | None = None
+  learning_rate: float = 1.0e-4
+  gamma: float = 0.99
   tau: float = 0.95
-  e_clip: float = 0.2
+  e_clip: float = 0.1
   grad_norm: float = 1.0
-  critic_coef: float = 1.0
-  entropy_coef: float = 0.005
+  critic_coef: float = 4.0
+  entropy_coef: float = 0.0
+  reward_scale: float = 0.01
+  bounds_loss_coef: float = 0.0001
+  mixed_precision: bool = True
+  normalize_input: bool = True
+  normalize_value: bool = True
+  normalize_advantage: bool = True
+  lr_schedule: Literal["adaptive", "linear", "none"] = "adaptive"
+  schedule_type: Literal["legacy", "standard"] = "standard"
+  kl_threshold: float = 0.016
+  save_best_after: int = 100
+  save_frequency: int = 3000
+  games_to_track: int = 3000
+  use_asymmetric_critic: bool = True
+  use_lstm: bool = True
   sapg_blocks: int = 6
   sapg_conditioning_dim: int = 32
   sapg_use_others_experience: bool = True
+  sapg_off_policy_ratio: float = 1.0
+  sapg_entropy_coef_scale: float = 0.005
 
 
 def _gym_box(shape: tuple[int, ...], low: float, high: float) -> gym.spaces.Box:
@@ -54,31 +76,37 @@ class MjlabSimpleRlWrapper:
   def __init__(self, env: ManagerBasedRlEnv, obs_group: str = "actor") -> None:
     self.env = env
     self.obs_group = obs_group
+    self.state_group = "critic"
     self.num_envs = env.num_envs
-    self.num_states = 0
+    self.num_states = N_OBS
     self.device = torch.device(env.device)
     self.observation_space = _gym_box((N_OBS,), -np.inf, np.inf)
+    self.state_space = _gym_box((N_OBS,), -np.inf, np.inf)
     self.action_space = _gym_box((N_ACT,), -1.0, 1.0)
 
   def get_env_info(self) -> dict:
     return {
       "observation_space": self.observation_space,
+      "state_space": self.state_space,
       "action_space": self.action_space,
       "agents": 1,
       "value_size": 1,
     }
 
-  def reset(self) -> torch.Tensor:
+  def _obs_dict(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    return {"obs": obs[self.obs_group], "states": obs[self.state_group]}
+
+  def reset(self) -> dict[str, torch.Tensor]:
     obs, _ = self.env.reset()
-    return obs[self.obs_group]
+    return self._obs_dict(obs)
 
   def step(
     self, actions: torch.Tensor
-  ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict]:
+  ) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor, dict]:
     obs, rew, terminated, truncated, extras = self.env.step(actions.to(self.env.device))
     infos = dict(extras)
     infos["time_outs"] = truncated
-    return obs[self.obs_group], rew, terminated | truncated, infos
+    return self._obs_dict(obs), rew, terminated | truncated, infos
 
   def set_train_info(self, env_frames: int, *args, **kwargs) -> None:
     del env_frames, args, kwargs
@@ -116,6 +144,7 @@ class MjlabRlGamesVecEnv:
     self.state_group = state_group
     self.num_envs = env.num_envs
     self.observation_space = _gym_box((N_OBS,), -np.inf, np.inf)
+    self.state_space = _gym_box((N_OBS,), -np.inf, np.inf)
     self.action_space = _gym_box((N_ACT,), -1.0, 1.0)
 
   def _obs_dict(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -139,6 +168,9 @@ class MjlabRlGamesVecEnv:
     return {
       "action_space": self.action_space,
       "observation_space": self.observation_space,
+      "state_space": self.state_space,
+      "agents": 1,
+      "value_size": 1,
     }
 
   def get_number_of_agents(self) -> int:
@@ -162,7 +194,8 @@ def make_simple_rl_configs(
   num_envs: int,
 ) -> tuple[object, object]:
   from simple_rl.agent import PpoConfig, SapgConfig
-  from simple_rl.utils.network import MlpConfig, NetworkConfig
+  from simple_rl.utils.asymmetric_critic import AsymmetricCriticConfig
+  from simple_rl.utils.network import MlpConfig, NetworkConfig, RnnConfig
   from simple_rl.utils.rewards_shaper import RewardsShaperParams
 
   sapg = None
@@ -171,35 +204,79 @@ def make_simple_rl_configs(
       num_conditionings=cfg.sapg_blocks,
       conditioning_dim=cfg.sapg_conditioning_dim,
       use_others_experience=cfg.sapg_use_others_experience,
-      entropy_coef_scale=cfg.entropy_coef,
+      off_policy_ratio=int(cfg.sapg_off_policy_ratio),
+      use_entropy_bonus=True,
+      entropy_coef_scale=cfg.sapg_entropy_coef_scale,
     )
 
-  minibatch_size = cfg.minibatch_size or num_envs * cfg.horizon_length // 4
+  minibatch_size = cfg.minibatch_size or 16_384
+  mini_epochs = cfg.mini_epochs or 2
+  lr_schedule = None if cfg.lr_schedule == "none" else cfg.lr_schedule
+  network = NetworkConfig(
+    mlp=MlpConfig(units=(1024, 1024, 512, 512)),
+    rnn=RnnConfig(
+      name="lstm",
+      units=1024,
+      layers=1,
+      before_mlp=True,
+      layer_norm=True,
+    )
+    if cfg.use_lstm
+    else None,
+  )
+  asymmetric_critic = None
+  if cfg.use_asymmetric_critic:
+    asymmetric_minibatch_size = cfg.minibatch_size or (
+      16_384 if cfg.algorithm == "sapg" else 98_304
+    )
+    asymmetric_critic = AsymmetricCriticConfig(
+      name="asymmetric_critic",
+      learning_rate=cfg.learning_rate,
+      mini_epochs=mini_epochs,
+      normalize_input=cfg.normalize_input,
+      truncate_grads=True,
+      minibatch_size=asymmetric_minibatch_size,
+      lr_schedule=None,
+      network=NetworkConfig(
+        mlp=MlpConfig(units=(1024, 1024, 512, 512)),
+        asymmetric_critic=True,
+      ),
+      grad_norm=cfg.grad_norm,
+      e_clip=cfg.e_clip,
+    )
   ppo = PpoConfig(
     num_actors=num_envs,
     learning_rate=cfg.learning_rate,
-    entropy_coef=0.0 if sapg is not None else cfg.entropy_coef,
+    entropy_coef=cfg.entropy_coef,
     horizon_length=cfg.horizon_length,
-    normalize_advantage=True,
-    normalize_input=True,
+    normalize_advantage=cfg.normalize_advantage,
+    normalize_input=cfg.normalize_input,
     grad_norm=cfg.grad_norm,
     critic_coef=cfg.critic_coef,
     gamma=cfg.gamma,
     tau=cfg.tau,
-    reward_shaper=RewardsShaperParams(scale_value=1.0),
-    mini_epochs=cfg.mini_epochs,
+    reward_shaper=RewardsShaperParams(scale_value=cfg.reward_scale),
+    mini_epochs=mini_epochs,
     e_clip=cfg.e_clip,
     device="cuda:0",
     minibatch_size=minibatch_size,
     max_epochs=cfg.max_epochs,
+    max_frames=cfg.max_frames,
     seq_length=cfg.horizon_length,
-    normalize_value=True,
+    normalize_value=cfg.normalize_value,
     truncate_grads=True,
-    bounds_loss_coef=0.0,
+    mixed_precision=cfg.mixed_precision,
+    bounds_loss_coef=cfg.bounds_loss_coef,
+    lr_schedule=lr_schedule,
+    schedule_type=cfg.schedule_type,
+    kl_threshold=cfg.kl_threshold if lr_schedule == "adaptive" else None,
+    save_frequency=cfg.save_frequency,
+    save_best_after=cfg.save_best_after,
+    games_to_track=cfg.games_to_track,
+    asymmetric_critic=asymmetric_critic,
     sapg=sapg,
     print_stats=True,
   )
-  network = NetworkConfig(mlp=MlpConfig(units=(512, 256, 128)))
   return ppo, network
 
 
@@ -208,40 +285,86 @@ def make_rl_games_config(
   num_envs: int,
   device: str,
 ) -> dict:
-  minibatch_size = cfg.minibatch_size or num_envs * cfg.horizon_length // 4
+  minibatch_size = cfg.minibatch_size or (
+    16_384 if cfg.algorithm == "sapg" else 32_768
+  )
+  mini_epochs = cfg.mini_epochs or (2 if cfg.algorithm == "sapg" else 4)
   expl_type = "none"
   fixed_sigma = "fixed"
   block_size = num_envs
+  use_others_experience = "none"
+  expl_reward_type = "rnd"
+  expl_reward_coef_scale = 1.0
   if cfg.algorithm == "sapg":
     expl_type = "mixed_expl_learn_param"
     fixed_sigma = "coef_cond"
     block_size = num_envs // cfg.sapg_blocks
+    use_others_experience = "lf" if cfg.sapg_use_others_experience else "none"
+    expl_reward_type = "entropy"
+    expl_reward_coef_scale = cfg.sapg_entropy_coef_scale
 
-  return {
-    "params": {
-      "seed": 42,
-      "algo": {"name": "a2c_continuous"},
-      "model": {"name": "continuous_a2c_logstd"},
+  lr_schedule = None if cfg.lr_schedule == "none" else cfg.lr_schedule
+  network = {
+    "name": "actor_critic",
+    "separate": False,
+    "space": {
+      "continuous": {
+        "mu_activation": "None",
+        "sigma_activation": "None",
+        "mu_init": {"name": "default"},
+        "sigma_init": {"name": "const_initializer", "val": 0},
+        "fixed_sigma": fixed_sigma,
+      }
+    },
+    "mlp": {
+      "units": [1024, 1024, 512, 512],
+      "activation": "elu",
+      "d2rl": False,
+      "initializer": {"name": "default"},
+      "regularizer": {"name": "None"},
+    },
+  }
+  if cfg.use_lstm:
+    network["rnn"] = {
+      "name": "lstm",
+      "units": 1024,
+      "layers": 1,
+      "before_mlp": True,
+      "layer_norm": True,
+    }
+
+  central_value_config = None
+  if cfg.use_asymmetric_critic:
+    central_value_minibatch_size = cfg.minibatch_size or (
+      16_384 if cfg.algorithm == "sapg" else 98_304
+    )
+    central_value_config = {
+      "minibatch_size": central_value_minibatch_size,
+      "mini_epochs": 2,
+      "learning_rate": cfg.learning_rate,
+      "kl_threshold": cfg.kl_threshold,
+      "clip_value": True,
+      "normalize_input": cfg.normalize_input,
+      "truncate_grads": True,
       "network": {
         "name": "actor_critic",
-        "separate": False,
-        "space": {
-          "continuous": {
-            "mu_activation": "None",
-            "sigma_activation": "None",
-            "mu_init": {"name": "default"},
-            "sigma_init": {"name": "const_initializer", "val": 0},
-            "fixed_sigma": fixed_sigma,
-          }
-        },
+        "central_value": True,
         "mlp": {
-          "units": [512, 256, 128],
+          "units": [1024, 1024, 512, 512],
           "activation": "elu",
           "d2rl": False,
           "initializer": {"name": "default"},
           "regularizer": {"name": "None"},
         },
       },
+    }
+
+  return {
+    "params": {
+      "seed": 42,
+      "algo": {"name": "a2c_continuous"},
+      "model": {"name": "continuous_a2c_logstd"},
+      "network": network,
       "config": {
         "name": f"simtoolreal_mjlab_{cfg.algorithm}",
         "device_name": device,
@@ -249,41 +372,44 @@ def make_rl_games_config(
         "network_path": str(cfg.experiment_dir / "rl_games_nn"),
         "log_path": str(cfg.experiment_dir / "rl_games_log"),
         "ppo": True,
-        "mixed_precision": False,
-        "normalize_input": True,
-        "normalize_value": True,
-        "normalize_advantage": True,
-        "reward_shaper": {"scale_value": 1.0},
+        "mixed_precision": cfg.mixed_precision,
+        "normalize_input": cfg.normalize_input,
+        "normalize_value": cfg.normalize_value,
+        "normalize_advantage": cfg.normalize_advantage,
+        "reward_shaper": {"scale_value": cfg.reward_scale},
         "num_actors": num_envs,
         "gamma": cfg.gamma,
         "tau": cfg.tau,
         "learning_rate": cfg.learning_rate,
-        "lr_schedule": None,
+        "lr_schedule": lr_schedule,
+        "kl_threshold": cfg.kl_threshold,
         "clip_value": True,
-        "bounds_loss_coef": 0.0,
-        "schedule_type": "legacy",
-        "entropy_coef": 0.0 if cfg.algorithm == "sapg" else cfg.entropy_coef,
+        "bounds_loss_coef": cfg.bounds_loss_coef,
+        "schedule_type": cfg.schedule_type,
+        "entropy_coef": cfg.entropy_coef,
         "e_clip": cfg.e_clip,
         "minibatch_size": minibatch_size,
-        "mini_epochs": cfg.mini_epochs,
+        "mini_epochs": mini_epochs,
         "critic_coef": cfg.critic_coef,
         "grad_norm": cfg.grad_norm,
         "truncate_grads": True,
         "horizon_length": cfg.horizon_length,
         "seq_length": cfg.horizon_length,
         "max_epochs": cfg.max_epochs,
+        "max_frames": cfg.max_frames,
         "score_to_win": 1_000_000,
-        "save_best_after": 100,
-        "save_frequency": 0,
+        "save_best_after": cfg.save_best_after,
+        "save_frequency": cfg.save_frequency,
         "print_stats": True,
-        "use_others_experience": "none",
-        "off_policy_ratio": 1.0,
+        "use_others_experience": use_others_experience,
+        "off_policy_ratio": cfg.sapg_off_policy_ratio,
         "expl_type": expl_type,
         "expl_reward_coef_embd_size": cfg.sapg_conditioning_dim,
-        "expl_reward_coef_scale": cfg.entropy_coef,
-        "expl_reward_type": "none",
+        "expl_reward_coef_scale": expl_reward_coef_scale,
+        "expl_reward_type": expl_reward_type,
         "expl_coef_block_size": block_size,
         "good_reset_boundary": 0,
+        "central_value_config": central_value_config,
       },
     }
   }

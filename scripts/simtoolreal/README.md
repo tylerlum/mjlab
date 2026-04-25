@@ -85,16 +85,17 @@ uv run --extra cu128 python -m mjlab.scripts.train_simtoolreal \
 uv run --extra cu128 python -m mjlab.scripts.train_simtoolreal \
   --backend simple_rl --alt.algorithm ppo --num-envs 1024
 uv run --extra cu128 python -m mjlab.scripts.train_simtoolreal \
-  --backend simple_rl --alt.algorithm sapg --num-envs 1020
+  --backend simple_rl --alt.algorithm sapg --num-envs 1024
 
 # Vendored rl_games PPO or SAPG
 uv run --extra cu128 python -m mjlab.scripts.train_simtoolreal \
   --backend rl_games --alt.algorithm ppo --num-envs 1024
 uv run --extra cu128 python -m mjlab.scripts.train_simtoolreal \
-  --backend rl_games --alt.algorithm sapg --num-envs 1020
+  --backend rl_games --alt.algorithm sapg --num-envs 1024
 ```
 
-For SAPG, `num-envs` must be divisible by `--alt.sapg-blocks` (default 6).
+For SAPG, the entrypoint rounds `num-envs` up when needed so it splits evenly
+across `--alt.sapg-blocks` (default 6). For example, `1024` becomes `1026`.
 
 What is currently ported:
 
@@ -113,6 +114,11 @@ What is currently ported:
 - Vendored copies of `simple_rl` and the private `rl_games` fork from
   `simtoolreal_private`, with wrappers that expose the MJLab manager env to each
   trainer. Tiny PPO and SAPG smoke runs pass for both alternate backends.
+- The alternate backend defaults now follow the original SimToolReal LSTM
+  asymmetric PPO/SAPG YAMLs: `[1024, 1024, 512, 512]` MLP, 1024-unit LSTM,
+  asymmetric critic, reward scale `0.01`, horizon/sequence length `16`,
+  adaptive LR with KL threshold `0.016`, and SAPG `M=6` leader-follower entropy
+  settings.
 
 ## Important Parity Risks
 
@@ -130,8 +136,8 @@ What is currently ported:
 - Object scaling is implemented for primitive boxes. If mesh objects are added,
   scaling/contact bounds need to be validated separately.
 - The RSL-RL config is only a baseline runner path. The vendored `rl_games` and
-  `simple_rl` backends now run, but their hyperparameters are still compact
-  bridge defaults rather than the full original SimToolReal YAML.
+  `simple_rl` backends are the reproduction-oriented paths for the original
+  SAPG-style training setup.
 - The current harness uses the website MuJoCo XML directly. That is good for
   physics parity with the browser demo, but it bypasses MJLab manager-based reset,
   reward, termination, and vectorization code.
@@ -139,8 +145,6 @@ What is currently ported:
   SimToolReal MDP also uses keypoint pose errors, lifting rewards, action
   penalties, success windows, resets, random impulses, object distributions, and
   curriculum.
-- ONNX Runtime reports a GPU discovery warning on this machine but runs with the
-  CPU provider. PyTorch in the uv env sees CUDA.
 - Action saturation is visible in the smoke test. It may be normal for this policy
   early in the episode, but it should be compared against the browser demo and the
   original Python MuJoCo deployment before using it as a parity signal.
@@ -155,6 +159,5 @@ What is currently ported:
    action target filtering.
 3. Add the original random impulses, richer object distributions, physics/domain
    randomization, and curriculum terms once the simple-cuboid MDP is stable.
-4. Decide whether training should use the original `rl_games` SAPG path or the
-   cleaner `simple_rl` implementation from `simtoolreal_private`, then add that
-   runner after the MDP tensors match.
+4. Run longer `rl_games` SAPG and `simple_rl` SAPG jobs from the same MJLab task
+   and compare learning curves against the IsaacGym baseline.
