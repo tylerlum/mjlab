@@ -129,6 +129,26 @@ def keypoints(pos: np.ndarray, quat_xyzw: np.ndarray) -> np.ndarray:
   return np.asarray(points, dtype=np.float32)
 
 
+def normalized_action_to_targets(
+  action: np.ndarray, prev_targets: np.ndarray
+) -> np.ndarray:
+  """Convert SimToolReal normalized action to MuJoCo position-control targets."""
+  action = np.asarray(action, dtype=np.float32).reshape(N_ACT)
+  prev_targets = np.asarray(prev_targets, dtype=np.float32).reshape(N_ACT)
+
+  targets = np.zeros(N_ACT, dtype=np.float32)
+  targets[7:N_ACT] = 0.5 * (action[7:N_ACT] + 1.0) * (
+    Q_UPPER[7:N_ACT] - Q_LOWER[7:N_ACT]
+  ) + Q_LOWER[7:N_ACT]
+  targets[7:N_ACT] = 0.1 * targets[7:N_ACT] + 0.9 * prev_targets[7:N_ACT]
+  targets[7:N_ACT] = np.clip(targets[7:N_ACT], Q_LOWER[7:N_ACT], Q_UPPER[7:N_ACT])
+
+  targets[:7] = prev_targets[:7] + 1.5 * (1.0 / 60.0) * action[:7]
+  targets[:7] = np.clip(targets[:7], Q_LOWER[:7], Q_UPPER[:7])
+  targets[:7] = 0.1 * targets[:7] + 0.9 * prev_targets[:7]
+  return targets
+
+
 @dataclass
 class BodyCache:
   link7: int
@@ -270,17 +290,9 @@ class SimToolRealOnnxPolicy:
     return self.latest_action
 
   def _compute_joint_targets(self) -> None:
-    targets = np.zeros(N_ACT, dtype=np.float32)
-    targets[7:N_ACT] = 0.5 * (self.latest_action[7:N_ACT] + 1.0) * (
-      Q_UPPER[7:N_ACT] - Q_LOWER[7:N_ACT]
-    ) + Q_LOWER[7:N_ACT]
-    targets[7:N_ACT] = 0.1 * targets[7:N_ACT] + 0.9 * self.prev_targets[7:N_ACT]
-    targets[7:N_ACT] = np.clip(targets[7:N_ACT], Q_LOWER[7:N_ACT], Q_UPPER[7:N_ACT])
-
-    targets[:7] = self.prev_targets[:7] + 1.5 * (1.0 / 60.0) * self.latest_action[:7]
-    targets[:7] = np.clip(targets[:7], Q_LOWER[:7], Q_UPPER[:7])
-    targets[:7] = 0.1 * targets[:7] + 0.9 * self.prev_targets[:7]
-    self.prev_targets = targets
+    self.prev_targets = normalized_action_to_targets(
+      self.latest_action, self.prev_targets
+    )
 
   def apply_control(self, data: mujoco.MjData) -> None:
     data.ctrl[:N_ACT] = self.prev_targets

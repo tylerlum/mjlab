@@ -9,6 +9,8 @@ import pytest
 from mjlab.tasks.simtoolreal import (
   N_ACT,
   N_OBS,
+  SimToolRealBrowserEnv,
+  SimToolRealBrowserEnvCfg,
   SimToolRealOnnxPolicy,
   reset_object_and_goal,
   sim_step,
@@ -54,3 +56,19 @@ def test_simtoolreal_onnx_policy_rollout_smoke() -> None:
   assert policy.latest_action.shape == (N_ACT,)
   assert np.isfinite(policy.latest_action).all()
   assert np.isfinite(data.qpos).all()
+
+
+def test_simtoolreal_browser_env_pretrained_step() -> None:
+  env = SimToolRealBrowserEnv(
+    SimToolRealBrowserEnvCfg(scene_path=SCENE_PATH, policy_path=POLICY_PATH)
+  )
+  obs = env.reset()
+
+  next_obs, reward, done, info = env.step_pretrained_policy()
+
+  assert obs.shape == (N_OBS,)
+  assert next_obs.shape == (N_OBS,)
+  assert np.isfinite(next_obs).all()
+  assert np.isfinite(reward)
+  assert isinstance(done, bool)
+  assert "keypoint_max_dist" in info

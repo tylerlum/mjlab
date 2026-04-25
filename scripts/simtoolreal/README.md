@@ -44,6 +44,14 @@ The policy moves the object toward the goal, so ONNX inference, recurrent state,
 observation construction, and action filtering are live. This is not yet a full
 MJLab task or training environment.
 
+The reusable implementation lives in `src/mjlab/tasks/simtoolreal/`:
+
+- `policy.py`: browser-demo observation construction, ONNX inference, and action
+  filtering.
+- `browser_env.py`: single-environment MuJoCo reference API with reset, step,
+  pretrained-policy stepping, and reward diagnostics. This is the parity harness
+  for the later vectorized MJLab/Warp MDP.
+
 ## Important Parity Risks
 
 - Observation ordering currently follows the WASM demo, not the IsaacGym
