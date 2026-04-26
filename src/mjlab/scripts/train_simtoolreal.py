@@ -7,6 +7,7 @@ import io
 import os
 import warnings
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 
 import tyro
 
@@ -19,6 +20,11 @@ from mjlab.rl.simtoolreal_backend_cfg import (
   make_rl_games_config,
   make_simple_rl_configs,
 )
+from mjlab.tasks.simtoolreal.viewer_capture import (
+  SimToolRealViewerCaptureCfg,
+  SimToolRealViewerCaptureWrapper,
+)
+from mjlab.utils.wrappers import VideoRecorder
 
 TASK_ID = "Mjlab-SimToolReal-Iiwa-Sharpa-SimpleCuboid"
 
@@ -60,12 +66,72 @@ def _normalize_alt_cfg(cfg: SimToolRealTrainCli) -> SimToolRealTrainCli:
   return replace(cfg, num_envs=num_envs, alt=alt)
 
 
+def _maybe_start_wandb(cfg: SimToolRealTrainCli) -> None:
+  alt = cfg.alt
+  if not alt.wandb_activate:
+    return
+  import wandb
+
+  if wandb.run is not None:
+    return
+  run_name = alt.wandb_name or (
+    f"simtoolreal_mjlab_{cfg.backend}_{alt.algorithm}_"
+    f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+  )
+  wandb.init(
+    project=alt.wandb_project,
+    entity=alt.wandb_entity,
+    group=alt.wandb_group,
+    name=run_name,
+    config={
+      "backend": cfg.backend,
+      "algorithm": alt.algorithm,
+      "num_envs": cfg.num_envs,
+      "device": cfg.device,
+      "alt": alt.__dict__,
+    },
+  )
+
+
+def _maybe_finish_wandb(cfg: SimToolRealTrainCli) -> None:
+  if not cfg.alt.wandb_activate:
+    return
+  import wandb
+
+  if wandb.run is not None:
+    wandb.finish()
+
+
 def _make_env(cfg: SimToolRealTrainCli) -> ManagerBasedRlEnv:
   from mjlab.tasks.registry import load_env_cfg
 
   env_cfg = load_env_cfg(TASK_ID)
   env_cfg.scene.num_envs = cfg.num_envs
-  return ManagerBasedRlEnv(cfg=env_cfg, device=cfg.device)
+  env = ManagerBasedRlEnv(
+    cfg=env_cfg,
+    device=cfg.device,
+    render_mode="rgb_array" if cfg.alt.capture_video else None,
+  )
+  if cfg.alt.capture_video:
+    env = VideoRecorder(
+      env,
+      video_folder=cfg.alt.experiment_dir / "videos" / "train",
+      step_trigger=lambda step: step % cfg.alt.capture_video_freq == 0,
+      video_length=cfg.alt.capture_video_len,
+      disable_logger=True,
+    )
+  if cfg.alt.capture_viewer:
+    env = SimToolRealViewerCaptureWrapper(
+      env,
+      SimToolRealViewerCaptureCfg(
+        enabled=True,
+        output_dir=cfg.alt.experiment_dir / "videos" / "train",
+        capture_freq=cfg.alt.capture_viewer_freq,
+        capture_len=cfg.alt.capture_viewer_len,
+        log_to_wandb=cfg.alt.wandb_activate,
+      ),
+    )
+  return env
 
 
 def _run_simple_rl(cfg: SimToolRealTrainCli) -> None:
@@ -73,6 +139,7 @@ def _run_simple_rl(cfg: SimToolRealTrainCli) -> None:
 
   alt = cfg.alt
   alt.experiment_dir.mkdir(parents=True, exist_ok=True)
+  _maybe_start_wandb(cfg)
   env = _make_env(cfg)
   wrapper = MjlabSimpleRlWrapper(env)
   ppo_cfg, network_cfg = make_simple_rl_configs(alt, num_envs=env.num_envs)
@@ -87,6 +154,7 @@ def _run_simple_rl(cfg: SimToolRealTrainCli) -> None:
     agent.train()
   finally:
     wrapper.close()
+    _maybe_finish_wandb(cfg)
 
 
 def _run_rl_games(cfg: SimToolRealTrainCli) -> None:
@@ -94,6 +162,7 @@ def _run_rl_games(cfg: SimToolRealTrainCli) -> None:
 
   alt = cfg.alt
   alt.experiment_dir.mkdir(parents=True, exist_ok=True)
+  _maybe_start_wandb(cfg)
   env = _make_env(cfg)
   vec_env = MjlabRlGamesVecEnv(env)
   runner_cfg = make_rl_games_config(alt, num_envs=env.num_envs, device=cfg.device)
@@ -104,6 +173,7 @@ def _run_rl_games(cfg: SimToolRealTrainCli) -> None:
     runner.run({"train": True, "play": False, "checkpoint": None, "sigma": None})
   finally:
     vec_env.close()
+    _maybe_finish_wandb(cfg)
 
 
 def main() -> None:

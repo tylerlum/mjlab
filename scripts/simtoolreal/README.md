@@ -106,10 +106,18 @@ What is currently ported:
   relative control and hand absolute target smoothing.
 - 140-dimensional observation tensor matching the browser-policy shape.
 - Vectorized object and goal resets with per-env origin offsets.
-- Primitive cuboid object size randomization through MJLab `dr.geom_size`, which
-  also updates `geom_rbound` and `geom_aabb` for Warp.
-- First-pass lifting, keypoint-progress, success, velocity, fall, distance, and
-  timeout terms.
+- Source handle/head object-size distributions collapsed to one equivalent box
+  per world through MJLab `dr.geom_size`, which also updates `geom_rbound` and
+  `geom_aabb` for Warp. This keeps the MDP distribution closer while MJLab lacks
+  same-scene different-primitive objects.
+- 60 Hz policy/control cadence (`timestep=1/120`, `decimation=2`) with 10 second
+  training episodes.
+- Stateful lifting, lift-bonus, fixed-size keypoint-progress, pre-lift
+  fingertip-progress, success-window, action penalty, velocity, fall, distance,
+  and timeout terms.
+- Training-time sim-to-real randomization for observation/action delay,
+  object-state delay/noise, joint-velocity noise, object reset pose/rotation,
+  and source-scale random force/torque perturbations while lifted.
 - RSL-RL PPO runner config as a runnable baseline.
 - Vendored copies of `simple_rl` and the private `rl_games` fork from
   `simtoolreal_private`, with wrappers that expose the MJLab manager env to each
@@ -119,6 +127,9 @@ What is currently ported:
   asymmetric critic, reward scale `0.01`, horizon/sequence length `16`,
   adaptive LR with KL threshold `0.016`, and SAPG `M=6` leader-follower entropy
   settings.
+- Alternate training can log pose-based interactive viewer clips copied from
+  `simtoolreal_private` with `--alt.capture-viewer --alt.wandb-activate`, and can
+  save MJLab offscreen videos with `--alt.capture-video`.
 
 ## Important Parity Risks
 
@@ -130,11 +141,12 @@ What is currently ported:
   actuators. The browser harness uses the website MuJoCo XML. Joint names and
   kinematic body names now come from the IsaacGym/URDF path, but actuator gains,
   contact settings, inertias, and geom simplifications still need parity audits.
-- The task currently starts with one primitive cuboid distribution from
-  `simtoolreal_private`. I did not find an obvious same-scene,
-  different-mesh-per-world API in this pass.
-- Object scaling is implemented for primitive boxes. If mesh objects are added,
-  scaling/contact bounds need to be validated separately.
+- Object geometry is still one box per world. The source object sampler chooses
+  cylinder/cuboid handles plus cuboid/no heads; MJLab currently approximates those
+  as an equivalent bounding box, so contact geometry is not yet exact.
+- Goal success currently terminates the episode. IsaacGym SimToolReal samples a
+  new goal after success and can continue within the same episode; this needs a
+  dedicated manager term if we want exact goal-reset behavior.
 - The RSL-RL config is only a baseline runner path. The vendored `rl_games` and
   `simple_rl` backends are the reproduction-oriented paths for the original
   SAPG-style training setup.
@@ -157,7 +169,8 @@ What is currently ported:
 2. Add saved-state parity tests between the browser harness, source MuJoCo/URDF
    env, and manager-based MJLab env for keypoints, palm/fingertip positions, and
    action target filtering.
-3. Add the original random impulses, richer object distributions, physics/domain
-   randomization, and curriculum terms once the simple-cuboid MDP is stable.
+3. Replace the equivalent-box object approximation with true per-world
+   cylinder/cuboid handle/head objects once MJLab supports different primitive or
+   mesh composition per world.
 4. Run longer `rl_games` SAPG and `simple_rl` SAPG jobs from the same MJLab task
    and compare learning curves against the IsaacGym baseline.

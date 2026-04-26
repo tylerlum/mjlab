@@ -23,15 +23,26 @@ from mjlab.viewer import ViewerConfig
 
 
 def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
-  """Create the SimToolReal KUKA+Sharpa simple-cuboid training environment.
+  """Create the SimToolReal KUKA+Sharpa training environment.
 
   This is the manager-based MJLab/Warp port of the IsaacGym MDP, using the source
-  URDF assets directly instead of the browser-demo XML. The first trainable target
-  is the simple cuboid distribution from simtoolreal_private.
+  URDF assets directly instead of the browser-demo XML. The current object sampler
+  uses source handle/head size distributions collapsed to one equivalent box until
+  per-world primitive/mesh swaps are ready.
   """
   simtoolreal_obs = ObservationTermCfg(
     func=mdp.simtoolreal_observation,
-    clip=(-50.0, 50.0),
+    params={
+      "use_object_state_delay_noise": not play,
+      "object_state_delay_max": 10,
+      "object_state_xyz_noise_std": 0.0 if play else 0.01,
+      "object_state_rotation_noise_degrees": 0.0 if play else 5.0,
+      "object_scale_noise_multiplier_range": (1.0, 1.0),
+      "joint_velocity_obs_noise_std": 0.0 if play else 0.1,
+    },
+    clip=(-10.0, 10.0),
+    delay_min_lag=0,
+    delay_max_lag=0 if play else 3,
   )
   observations = {
     "actor": ObservationGroupCfg(
@@ -48,13 +59,22 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       mode="reset",
     ),
     "randomize_object_size": EventTermCfg(
-      func=mdp.randomize_simple_cuboid_size,
+      func=mdp.randomize_handle_head_equivalent_size,
       mode="reset",
       params={"asset_cfg": object_geom_cfg},
     ),
     "reset_object": EventTermCfg(
       func=mdp.reset_object_uniform,
       mode="reset",
+      params={
+        "x_range": (0.0, 0.0),
+        "y_range": (0.05, 0.05),
+        "table_surface_z": 0.53,
+        "reset_position_noise_x": 0.0 if play else 0.1,
+        "reset_position_noise_y": 0.0 if play else 0.1,
+        "reset_position_noise_z": 0.0 if play else 0.02,
+        "randomize_object_rotation": not play,
+      },
     ),
     "reset_goal": EventTermCfg(
       func=mdp.reset_goal_uniform,
@@ -68,9 +88,25 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       func=mdp.cache_prev_targets,
       mode="step",
     ),
+    "random_object_perturbations": EventTermCfg(
+      func=mdp.apply_random_object_perturbations,
+      mode="step",
+      params={
+        "asset_cfg": SceneEntityCfg("object", body_names=("object",)),
+        "force_scale": 0.0 if play else 20.0,
+        "torque_scale": 0.0 if play else 2.0,
+        "force_decay": 0.0,
+        "torque_decay": 0.0,
+        "force_decay_interval": 0.08,
+        "torque_decay_interval": 0.08,
+        "lin_vel_impulse_scale": 0.0,
+        "ang_vel_impulse_scale": 0.0,
+      },
+    ),
   }
 
   rewards = {
+    "fingertip_delta": RewardTermCfg(func=mdp.fingertip_delta_reward, weight=50.0),
     "lift": RewardTermCfg(func=mdp.lifting_reward, weight=20.0),
     "lift_bonus": RewardTermCfg(func=mdp.lifting_bonus_reward, weight=1.0),
     "keypoint_delta": RewardTermCfg(func=mdp.keypoint_delta_reward, weight=200.0),
@@ -102,7 +138,11 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     ),
     observations=observations,
     actions={
-      "joint_pos": mdp.SimToolRealJointPositionActionCfg(entity_name="robot"),
+      "joint_pos": mdp.SimToolRealJointPositionActionCfg(
+        entity_name="robot",
+        use_action_delay=not play,
+        action_delay_max=3,
+      ),
     },
     events=events,
     rewards=rewards,
@@ -121,7 +161,7 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       nconmax=96,
       njmax=512,
       mujoco=MujocoCfg(
-        timestep=0.001,
+        timestep=1.0 / 120.0,
         integrator="implicitfast",
         cone="elliptic",
         impratio=10.0,
@@ -129,7 +169,7 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ls_iterations=20,
       ),
     ),
-    decimation=17,
-    episode_length_s=1.0e9 if play else 20.0,
+    decimation=2,
+    episode_length_s=1.0e9 if play else 10.0,
     scale_rewards_by_dt=False,
   )

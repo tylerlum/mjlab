@@ -60,6 +60,17 @@ class SimToolRealAltRunnerCfg:
   sapg_use_others_experience: bool = True
   sapg_off_policy_ratio: float = 1.0
   sapg_entropy_coef_scale: float = 0.005
+  wandb_activate: bool = False
+  wandb_project: str = "simtoolreal_mjlab"
+  wandb_entity: str | None = None
+  wandb_group: str | None = None
+  wandb_name: str | None = None
+  capture_viewer: bool = False
+  capture_viewer_freq: int = 6000
+  capture_viewer_len: int = 600
+  capture_video: bool = False
+  capture_video_freq: int = 6000
+  capture_video_len: int = 600
 
 
 def _gym_box(shape: tuple[int, ...], low: float, high: float) -> gym.spaces.Box:
@@ -368,6 +379,7 @@ def make_rl_games_config(
       "config": {
         "name": f"simtoolreal_mjlab_{cfg.algorithm}",
         "device_name": device,
+        "device": device,
         "env_name": "mjlab",
         "network_path": str(cfg.experiment_dir / "rl_games_nn"),
         "log_path": str(cfg.experiment_dir / "rl_games_log"),

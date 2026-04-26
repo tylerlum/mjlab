@@ -10,7 +10,7 @@ import torch
 
 from mjlab.envs.mdp import dr
 from mjlab.managers.action_manager import ActionTerm, ActionTermCfg
-from mjlab.managers.event_manager import requires_model_fields
+from mjlab.managers.event_manager import RecomputeLevel, requires_model_fields
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.tasks.simtoolreal.assets import JOINT_NAMES
 from mjlab.utils.lab_api.math import quat_apply, quat_from_euler_xyz
@@ -25,6 +25,7 @@ OBJECT_BASE_SIZE = 0.04
 OBJECT_KEYPOINT_SIGNS = torch.tensor(
   [[1.0, 1.0, 1.0], [1.0, 1.0, -1.0], [-1.0, -1.0, 1.0], [-1.0, -1.0, -1.0]]
 )
+FIXED_SIZE = torch.tensor([0.141, 0.03025, 0.0271])
 PALM_OFFSET = torch.tensor([0.0, -0.02, 0.16])
 FINGERTIP_OFFSET = torch.tensor([0.02, 0.002, 0.0])
 FINGERTIP_BODIES = (
@@ -35,6 +36,22 @@ FINGERTIP_BODIES = (
   "left_pinky_DP",
 )
 OBJECT_GEOM_CFG = SceneEntityCfg("object", geom_names=("object_geom",))
+OBJECT_BODY_CFG = SceneEntityCfg("object", body_names=("object",))
+
+HANDLE_HEAD_DISTRIBUTIONS = (
+  ((0.15, 0.02, 0.015), (0.30, 0.04, 0.03), (0.02, 0.05, 0.02), (0.06, 0.12, 0.06)),
+  ((0.15, 0.015), (0.30, 0.03), (0.02, 0.05, 0.02), (0.06, 0.12, 0.06)),
+  ((0.07, 0.025, 0.025), (0.12, 0.04, 0.04), (0.07, 0.01, 0.01), (0.15, 0.015, 0.015)),
+  ((0.07, 0.025), (0.12, 0.04), (0.07, 0.01, 0.01), (0.15, 0.015, 0.015)),
+  ((0.075, 0.015), (0.15, 0.03), (0.01, 0.005, 0.005), (0.03, 0.01, 0.01)),
+  ((0.10, 0.0125, 0.006), (0.20, 0.025, 0.025), (0.05, 0.03, 0.01), (0.15, 0.07, 0.03)),
+  ((0.10, 0.0125), (0.20, 0.025), (0.05, 0.03, 0.01), (0.15, 0.07, 0.03)),
+  ((0.07, 0.02, 0.02), (0.15, 0.07, 0.07), None, None),
+  ((0.05, 0.01, 0.01), (0.20, 0.04, 0.03), (0.05, 0.03, 0.03), (0.12, 0.05, 0.08)),
+  ((0.05, 0.01), (0.20, 0.03), (0.05, 0.03, 0.03), (0.12, 0.05, 0.08)),
+  ((0.05, 0.01, 0.01), (0.20, 0.04, 0.03), (0.05, 0.05, 0.02), (0.12, 0.12, 0.04)),
+  ((0.05, 0.01), (0.20, 0.03), (0.05, 0.05, 0.02), (0.12, 0.12, 0.04)),
+)
 
 Q_LOWER = torch.tensor(
   [
@@ -113,14 +130,87 @@ def _state(env: ManagerBasedRlEnv) -> dict[str, torch.Tensor]:
       "closest_keypoint_max_dist": torch.full(
         (env.num_envs,), float("inf"), device=env.device
       ),
+      "closest_keypoint_max_dist_fixed_size": torch.full(
+        (env.num_envs,), float("inf"), device=env.device
+      ),
+      "closest_fingertip_dist": torch.full(
+        (env.num_envs, len(FINGERTIP_BODIES)), float("inf"), device=env.device
+      ),
+      "furthest_hand_dist": torch.zeros(env.num_envs, device=env.device),
       "near_goal_steps": torch.zeros(env.num_envs, device=env.device),
+      "successes": torch.zeros(env.num_envs, device=env.device),
       "lifted_object": torch.zeros(env.num_envs, device=env.device, dtype=torch.bool),
       "just_lifted_object": torch.zeros(
         env.num_envs, device=env.device, dtype=torch.bool
       ),
       "initial_object_z": torch.full((env.num_envs,), 0.545, device=env.device),
+      "object_masses": torch.full((env.num_envs,), 0.08, device=env.device),
+      "rb_forces": torch.zeros(env.num_envs, 1, 3, device=env.device),
+      "rb_torques": torch.zeros(env.num_envs, 1, 3, device=env.device),
+      "random_force_prob": _log_uniform(env, 0.001, 0.1, (env.num_envs,)),
+      "random_torque_prob": _log_uniform(env, 0.001, 0.1, (env.num_envs,)),
+      "random_lin_vel_impulse_prob": _log_uniform(env, 0.001, 0.1, (env.num_envs,)),
+      "random_ang_vel_impulse_prob": _log_uniform(env, 0.001, 0.1, (env.num_envs,)),
+      "object_state_queue": None,
     }
   return env._simtoolreal_state  # type: ignore[attr-defined]
+
+
+def _log_uniform(
+  env: ManagerBasedRlEnv,
+  min_value: float,
+  max_value: float,
+  shape: tuple[int, ...],
+) -> torch.Tensor:
+  return torch.exp(
+    torch.empty(shape, device=env.device).uniform_(
+      math.log(min_value), math.log(max_value)
+    )
+  )
+
+
+def _update_queue(queue: torch.Tensor, current: torch.Tensor) -> torch.Tensor:
+  queue[:, 1:] = queue[:, :-1].clone()
+  queue[:, 0] = current
+  return queue
+
+
+def _random_quat(env: ManagerBasedRlEnv, n: int) -> torch.Tensor:
+  uvw = torch.rand((n, 3), device=env.device)
+  qx = torch.sqrt(1.0 - uvw[:, 0]) * torch.sin(2.0 * math.pi * uvw[:, 1])
+  qy = torch.sqrt(1.0 - uvw[:, 0]) * torch.cos(2.0 * math.pi * uvw[:, 1])
+  qz = torch.sqrt(uvw[:, 0]) * torch.sin(2.0 * math.pi * uvw[:, 2])
+  qw = torch.sqrt(uvw[:, 0]) * torch.cos(2.0 * math.pi * uvw[:, 2])
+  return torch.stack([qw, qx, qy, qz], dim=-1)
+
+
+def _quat_mul(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
+  w1, x1, y1, z1 = q1.unbind(dim=-1)
+  w2, x2, y2, z2 = q2.unbind(dim=-1)
+  return torch.stack(
+    [
+      w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+      w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+      w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+      w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+    ],
+    dim=-1,
+  )
+
+
+def _quat_normalize(q: torch.Tensor) -> torch.Tensor:
+  return q / torch.linalg.norm(q, dim=-1, keepdim=True).clamp_min(1.0e-8)
+
+
+def _random_small_quat(env: ManagerBasedRlEnv, n: int, max_angle: float) -> torch.Tensor:
+  axis = torch.randn((n, 3), device=env.device)
+  axis = axis / torch.linalg.norm(axis, dim=-1, keepdim=True).clamp_min(1.0e-8)
+  angle = torch.empty(n, device=env.device).uniform_(-max_angle, max_angle)
+  half_angle = 0.5 * angle
+  return torch.cat(
+    [torch.cos(half_angle)[:, None], axis * torch.sin(half_angle)[:, None]],
+    dim=-1,
+  )
 
 
 def _q_limits(env: ManagerBasedRlEnv) -> tuple[torch.Tensor, torch.Tensor]:
@@ -144,6 +234,8 @@ class SimToolRealJointPositionActionCfg(ActionTermCfg):
   hand_moving_average: float = 0.1
   arm_moving_average: float = 0.1
   arm_speed_scale: float = 1.5
+  use_action_delay: bool = True
+  action_delay_max: int = 3
 
   def build(self, env: ManagerBasedRlEnv) -> "SimToolRealJointPositionAction":
     return SimToolRealJointPositionAction(self, env)
@@ -159,6 +251,10 @@ class SimToolRealJointPositionAction(ActionTerm):
       raise RuntimeError(f"Unexpected SimToolReal joint order: {joint_names}")
     self._joint_ids = torch.tensor(joint_ids, device=self.device, dtype=torch.long)
     self._raw_actions = torch.zeros(self.num_envs, N_ACT, device=self.device)
+    self._delayed_actions = torch.zeros_like(self._raw_actions)
+    self._action_queue = torch.zeros(
+      self.num_envs, max(1, cfg.action_delay_max), N_ACT, device=self.device
+    )
     self.prev_targets = self._entity.data.default_joint_pos[:, self._joint_ids].clone()
     self.targets = self.prev_targets.clone()
 
@@ -170,12 +266,27 @@ class SimToolRealJointPositionAction(ActionTerm):
   def raw_action(self) -> torch.Tensor:
     return self._raw_actions
 
+  @property
+  def applied_action(self) -> torch.Tensor:
+    return self._delayed_actions
+
   def process_actions(self, actions: torch.Tensor) -> None:
     self._raw_actions[:] = torch.clamp(actions.to(self.device), -1.0, 1.0)
+    _update_queue(self._action_queue, self._raw_actions)
+    if self.cfg.use_action_delay and self.cfg.action_delay_max > 1:
+      delay_ids = torch.randint(
+        0, self.cfg.action_delay_max, (self.num_envs,), device=self.device
+      )
+      actions_for_targets = self._action_queue[
+        torch.arange(self.num_envs, device=self.device), delay_ids
+      ]
+    else:
+      actions_for_targets = self._raw_actions
+    self._delayed_actions[:] = actions_for_targets
     q_lower, q_upper = _q_limits(self._env)
     targets = self.prev_targets.clone()
 
-    hand_targets = 0.5 * (self._raw_actions[:, 7:] + 1.0) * (
+    hand_targets = 0.5 * (actions_for_targets[:, 7:] + 1.0) * (
       q_upper[7:] - q_lower[7:]
     ) + q_lower[7:]
     targets[:, 7:] = (
@@ -186,7 +297,7 @@ class SimToolRealJointPositionAction(ActionTerm):
 
     arm_targets = (
       self.prev_targets[:, :7]
-      + self.cfg.arm_speed_scale * self._env.step_dt * self._raw_actions[:, :7]
+      + self.cfg.arm_speed_scale * self._env.step_dt * actions_for_targets[:, :7]
     )
     arm_targets = torch.clamp(arm_targets, q_lower[:7], q_upper[:7])
     targets[:, :7] = (
@@ -200,6 +311,8 @@ class SimToolRealJointPositionAction(ActionTerm):
 
   def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
     self._raw_actions[env_ids] = 0.0
+    self._delayed_actions[env_ids] = 0.0
+    self._action_queue[env_ids] = 0.0
     default = self._entity.data.default_joint_pos[:, self._joint_ids]
     self.prev_targets[env_ids] = default[env_ids]
     self.targets[env_ids] = default[env_ids]
@@ -220,9 +333,23 @@ def reset_simtoolreal_state(env: ManagerBasedRlEnv, env_ids: torch.Tensor | None
   object_pose = object_entity.data.root_link_pose_w
   state["initial_object_z"][env_ids] = object_pose[env_ids, 2]
   state["closest_keypoint_max_dist"][env_ids] = float("inf")
+  state["closest_keypoint_max_dist_fixed_size"][env_ids] = float("inf")
+  state["closest_fingertip_dist"][env_ids] = float("inf")
+  state["furthest_hand_dist"][env_ids] = 0.0
   state["near_goal_steps"][env_ids] = 0.0
+  state["successes"][env_ids] = 0.0
   state["lifted_object"][env_ids] = False
   state["just_lifted_object"][env_ids] = False
+  if state["object_state_queue"] is not None:
+    pose_vel = torch.cat(
+      [
+        object_pose[env_ids, :7],
+        object_entity.data.root_link_lin_vel_w[env_ids],
+        object_entity.data.root_link_ang_vel_w[env_ids],
+      ],
+      dim=-1,
+    )
+    state["object_state_queue"][env_ids] = pose_vel[:, None, :]
 
 
 def reset_object_uniform(
@@ -232,6 +359,10 @@ def reset_object_uniform(
   y_range: tuple[float, float] = (0.02, 0.08),
   z: float | None = None,
   table_surface_z: float = 0.53,
+  reset_position_noise_x: float = 0.1,
+  reset_position_noise_y: float = 0.1,
+  reset_position_noise_z: float = 0.02,
+  randomize_object_rotation: bool = True,
 ) -> None:
   if env_ids is None:
     env_ids = torch.arange(env.num_envs, device=env.device)
@@ -245,10 +376,16 @@ def reset_object_uniform(
     pos[:, 2] = table_surface_z + 0.5 * object_lengths[:, 2] + 0.002
   else:
     pos[:, 2] = z
+  rand = torch.empty((len(env_ids), 3), device=env.device).uniform_(-1.0, 1.0)
+  pos[:, 0] += reset_position_noise_x * rand[:, 0]
+  pos[:, 1] += reset_position_noise_y * rand[:, 1]
+  pos[:, 2] += reset_position_noise_z * rand[:, 2]
   pos += env.scene.env_origins[env_ids]
-  quat = torch.zeros((len(env_ids), 4), device=env.device)
-  yaw = torch.empty(len(env_ids), device=env.device).uniform_(-math.pi, math.pi)
-  quat[:] = quat_from_euler_xyz(torch.zeros_like(yaw), torch.zeros_like(yaw), yaw)
+  if randomize_object_rotation:
+    quat = _random_quat(env, len(env_ids))
+  else:
+    quat = torch.zeros((len(env_ids), 4), device=env.device)
+    quat[:, 0] = 1.0
   obj.write_root_link_pose_to_sim(torch.cat([pos, quat], dim=-1), env_ids=env_ids)
   obj.write_root_link_velocity_to_sim(torch.zeros((len(env_ids), 6), device=env.device), env_ids=env_ids)
 
@@ -273,6 +410,37 @@ def reset_goal_uniform(
   yaw = torch.empty(len(env_ids), device=env.device).uniform_(-math.pi, math.pi)
   quat = quat_from_euler_xyz(roll, pitch, yaw)
   goal.write_mocap_pose_to_sim(torch.cat([pos, quat], dim=-1), env_ids=env_ids)
+
+
+def sample_handle_head_equivalent_lengths(env: ManagerBasedRlEnv, n: int) -> torch.Tensor:
+  lengths = torch.zeros((n, 3), device=env.device)
+  choices = torch.randint(0, len(HANDLE_HEAD_DISTRIBUTIONS), (n,), device=env.device)
+  for i, (h_min, h_max, head_min, head_max) in enumerate(HANDLE_HEAD_DISTRIBUTIONS):
+    mask = choices == i
+    if not mask.any():
+      continue
+    count = int(mask.sum().item())
+    h_min_t = torch.tensor(h_min, device=env.device, dtype=torch.float32)
+    h_max_t = torch.tensor(h_max, device=env.device, dtype=torch.float32)
+    handle = torch.rand((count, len(h_min)), device=env.device) * (h_max_t - h_min_t) + h_min_t
+    if handle.shape[1] == 2:
+      handle = torch.stack([handle[:, 0], handle[:, 1], handle[:, 1]], dim=-1)
+    if head_min is None or head_max is None:
+      total = handle
+    else:
+      head_min_t = torch.tensor(head_min, device=env.device, dtype=torch.float32)
+      head_max_t = torch.tensor(head_max, device=env.device, dtype=torch.float32)
+      head = torch.rand((count, 3), device=env.device) * (head_max_t - head_min_t) + head_min_t
+      total = torch.stack(
+        [
+          handle[:, 0] + head[:, 0],
+          torch.maximum(handle[:, 1], head[:, 1]),
+          torch.maximum(handle[:, 2], head[:, 2]),
+        ],
+        dim=-1,
+      )
+    lengths[mask] = total
+  return lengths
 
 
 @requires_model_fields("geom_size", "geom_rbound", "geom_aabb")
@@ -306,6 +474,50 @@ def randomize_simple_cuboid_size(
   state["object_scales"][env_ids] = lengths / OBJECT_BASE_SIZE
 
 
+@requires_model_fields(
+  "geom_size",
+  "geom_rbound",
+  "geom_aabb",
+  "body_mass",
+  "body_inertia",
+  recompute=RecomputeLevel.set_const,
+)
+def randomize_handle_head_equivalent_size(
+  env: ManagerBasedRlEnv,
+  env_ids: torch.Tensor | None,
+  density: float = 400.0,
+  asset_cfg: SceneEntityCfg = OBJECT_GEOM_CFG,
+  body_cfg: SceneEntityCfg = OBJECT_BODY_CFG,
+) -> None:
+  if env_ids is None:
+    env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
+  else:
+    env_ids = env_ids.to(env.device, dtype=torch.int)
+  lengths = sample_handle_head_equivalent_lengths(env, len(env_ids))
+  obj = _object(env)
+  geom_ids = obj.indexing.geom_ids[asset_cfg.geom_ids]
+  env_grid = env_ids[:, None]
+  env.sim.model.geom_size[env_grid, geom_ids, :3] = 0.5 * lengths[:, None, :]
+  from mjlab.envs.mdp.dr.geom import _recompute_geom_bounds
+
+  _recompute_geom_bounds(env, env_ids=env_ids, asset_cfg=asset_cfg)
+  body_ids = obj.indexing.body_ids[body_cfg.body_ids]
+  mass = density * torch.prod(lengths, dim=-1)
+  inertia = torch.stack(
+    [
+      mass * (lengths[:, 1] ** 2 + lengths[:, 2] ** 2) / 12.0,
+      mass * (lengths[:, 0] ** 2 + lengths[:, 2] ** 2) / 12.0,
+      mass * (lengths[:, 0] ** 2 + lengths[:, 1] ** 2) / 12.0,
+    ],
+    dim=-1,
+  )
+  env.sim.model.body_mass[env_ids[:, None], body_ids] = mass[:, None]
+  env.sim.model.body_inertia[env_ids[:, None], body_ids] = inertia[:, None, :]
+  state = _state(env)
+  state["object_scales"][env_ids] = lengths / OBJECT_BASE_SIZE
+  state["object_masses"][env_ids] = mass
+
+
 def _body_pose(
   entity: Entity, body_names: tuple[str, ...]
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -318,6 +530,13 @@ def _body_pose(
 
 def _simtoolreal_kinematics(
   env: ManagerBasedRlEnv,
+  use_object_state_delay_noise: bool = True,
+  object_state_delay_max: int = 10,
+  object_state_xyz_noise_std: float = 0.01,
+  object_state_rotation_noise_degrees: float = 5.0,
+  object_scale_noise_multiplier_range: tuple[float, float] = (1.0, 1.0),
+  joint_velocity_obs_noise_std: float = 0.1,
+  fixed_size_keypoint_reward: bool = True,
 ) -> dict[str, torch.Tensor]:
   robot = _robot(env)
   obj = _object(env)
@@ -345,26 +564,72 @@ def _simtoolreal_kinematics(
 
   object_pos = obj.data.root_link_pos_w
   object_quat = obj.data.root_link_quat_w
+  object_lin_vel = obj.data.root_link_lin_vel_w
+  object_ang_vel = obj.data.root_link_ang_vel_w
+  if use_object_state_delay_noise and object_state_delay_max > 1:
+    pose_vel = torch.cat(
+      [object_pos, object_quat, object_lin_vel, object_ang_vel], dim=-1
+    )
+    queue = state.get("object_state_queue")
+    if queue is None or queue.shape != (env.num_envs, object_state_delay_max, 13):
+      queue = pose_vel[:, None, :].repeat(1, object_state_delay_max, 1)
+      state["object_state_queue"] = queue
+    _update_queue(queue, pose_vel)
+    delay_ids = torch.randint(
+      0, object_state_delay_max, (env.num_envs,), device=env.device
+    )
+    observed = queue[torch.arange(env.num_envs, device=env.device), delay_ids].clone()
+    object_pos = observed[:, :3]
+    object_quat = observed[:, 3:7]
+    object_lin_vel = observed[:, 7:10]
+    object_ang_vel = observed[:, 10:13]
+    object_pos = object_pos + torch.randn_like(object_pos) * object_state_xyz_noise_std
+    max_angle = math.radians(object_state_rotation_noise_degrees)
+    object_quat = _quat_normalize(
+      _quat_mul(_random_small_quat(env, env.num_envs, max_angle), object_quat)
+    )
   goal_pos = goal.data.root_link_pos_w
   goal_quat = goal.data.root_link_quat_w
 
   signs = OBJECT_KEYPOINT_SIGNS.to(env.device)
   offsets = signs[None] * (OBJECT_BASE_SIZE * 1.5 * 0.5)
-  offsets = offsets * state["object_scales"][:, None, :]
+  scales = state["object_scales"]
+  if use_object_state_delay_noise:
+    noise_min, noise_max = object_scale_noise_multiplier_range
+    scale_noise = torch.empty_like(scales).uniform_(noise_min, noise_max)
+    scales = scales * scale_noise
+  offsets = offsets * scales[:, None, :]
   object_keypoints = object_pos[:, None, :] + quat_apply(
     object_quat[:, None, :].repeat(1, 4, 1), offsets
   )
   goal_keypoints = goal_pos[:, None, :] + quat_apply(
     goal_quat[:, None, :].repeat(1, 4, 1), offsets
   )
+  fixed_offsets = signs[None] * (FIXED_SIZE.to(env.device) * 1.5 * 0.5)
+  fixed_offsets = fixed_offsets.repeat(env.num_envs, 1, 1)
+  object_keypoints_fixed = object_pos[:, None, :] + quat_apply(
+    object_quat[:, None, :].repeat(1, 4, 1), fixed_offsets
+  )
+  goal_keypoints_fixed = goal_pos[:, None, :] + quat_apply(
+    goal_quat[:, None, :].repeat(1, 4, 1), fixed_offsets
+  )
   keypoints_rel_goal = object_keypoints - goal_keypoints
+  keypoints_rel_goal_fixed = object_keypoints_fixed - goal_keypoints_fixed
   keypoint_dist = torch.linalg.norm(keypoints_rel_goal, dim=-1)
   keypoint_max_dist = keypoint_dist.max(dim=-1).values
+  keypoint_max_dist_fixed = torch.linalg.norm(keypoints_rel_goal_fixed, dim=-1).max(
+    dim=-1
+  ).values
+  fingertip_dist = torch.linalg.norm(fingertip_pos - object_pos[:, None, :], dim=-1)
+
+  joint_vel = robot.data.joint_vel[:, :N_ACT]
+  if joint_velocity_obs_noise_std > 0.0:
+    joint_vel = joint_vel + torch.randn_like(joint_vel) * joint_velocity_obs_noise_std
 
   return {
     "joint_pos_unscaled": (2.0 * robot.data.joint_pos[:, :N_ACT] - q_upper - q_lower)
     / (q_upper - q_lower),
-    "joint_vel": robot.data.joint_vel[:, :N_ACT],
+    "joint_vel": joint_vel,
     "prev_targets": prev_targets,
     "palm_pos": palm_pos,
     "palm_quat": palm_quat,
@@ -374,16 +639,36 @@ def _simtoolreal_kinematics(
       env.num_envs, -1
     ),
     "keypoints_rel_goal": keypoints_rel_goal.reshape(env.num_envs, -1),
-    "object_scales": state["object_scales"],
+    "object_scales": scales,
     "keypoint_max_dist": keypoint_max_dist,
+    "keypoint_max_dist_fixed": keypoint_max_dist_fixed
+    if fixed_size_keypoint_reward
+    else keypoint_max_dist,
+    "fingertip_dist": fingertip_dist,
     "object_pos": object_pos,
-    "object_lin_vel": obj.data.root_link_lin_vel_w,
-    "object_ang_vel": obj.data.root_link_ang_vel_w,
+    "object_lin_vel": object_lin_vel,
+    "object_ang_vel": object_ang_vel,
   }
 
 
-def simtoolreal_observation(env: ManagerBasedRlEnv) -> torch.Tensor:
-  kin = _simtoolreal_kinematics(env)
+def simtoolreal_observation(
+  env: ManagerBasedRlEnv,
+  use_object_state_delay_noise: bool = True,
+  object_state_delay_max: int = 10,
+  object_state_xyz_noise_std: float = 0.01,
+  object_state_rotation_noise_degrees: float = 5.0,
+  object_scale_noise_multiplier_range: tuple[float, float] = (1.0, 1.0),
+  joint_velocity_obs_noise_std: float = 0.1,
+) -> torch.Tensor:
+  kin = _simtoolreal_kinematics(
+    env,
+    use_object_state_delay_noise=use_object_state_delay_noise,
+    object_state_delay_max=object_state_delay_max,
+    object_state_xyz_noise_std=object_state_xyz_noise_std,
+    object_state_rotation_noise_degrees=object_state_rotation_noise_degrees,
+    object_scale_noise_multiplier_range=object_scale_noise_multiplier_range,
+    joint_velocity_obs_noise_std=joint_velocity_obs_noise_std,
+  )
   return torch.cat(
     [
       kin["joint_pos_unscaled"],
@@ -402,28 +687,54 @@ def simtoolreal_observation(env: ManagerBasedRlEnv) -> torch.Tensor:
 
 
 def keypoint_delta_reward(env: ManagerBasedRlEnv) -> torch.Tensor:
-  kin = _simtoolreal_kinematics(env)
+  kin = _simtoolreal_kinematics(env, use_object_state_delay_noise=False)
   state = _state(env)
   z_lift = 0.05 + kin["object_pos"][:, 2] - state["initial_object_z"]
   lifted = state["lifted_object"] | (z_lift > 0.15)
   state["lifted_object"][:] = lifted
   closest = state["closest_keypoint_max_dist"]
+  closest_fixed = state["closest_keypoint_max_dist_fixed_size"]
   first_sample = torch.isinf(closest)
-  delta = torch.where(
-    first_sample,
-    torch.zeros_like(closest),
-    torch.clamp(closest - kin["keypoint_max_dist"], min=0.0),
+  first_fixed = torch.isinf(closest_fixed)
+  delta_fixed = torch.where(
+    first_fixed,
+    torch.zeros_like(closest_fixed),
+    torch.clamp(closest_fixed - kin["keypoint_max_dist_fixed"], min=0.0),
   )
   closest[:] = torch.where(
     first_sample,
     kin["keypoint_max_dist"],
     torch.minimum(closest, kin["keypoint_max_dist"]),
   )
-  return delta * lifted
+  closest_fixed[:] = torch.where(
+    first_fixed,
+    kin["keypoint_max_dist_fixed"],
+    torch.minimum(closest_fixed, kin["keypoint_max_dist_fixed"]),
+  )
+  return delta_fixed * lifted
+
+
+def fingertip_delta_reward(env: ManagerBasedRlEnv) -> torch.Tensor:
+  kin = _simtoolreal_kinematics(env, use_object_state_delay_noise=False)
+  state = _state(env)
+  lifted = state["lifted_object"]
+  closest = state["closest_fingertip_dist"]
+  first_sample = torch.isinf(closest)
+  delta = torch.where(
+    first_sample,
+    torch.zeros_like(closest),
+    torch.clamp(closest - kin["fingertip_dist"], min=0.0),
+  )
+  state["closest_fingertip_dist"][:] = torch.where(
+    first_sample,
+    kin["fingertip_dist"],
+    torch.minimum(closest, kin["fingertip_dist"]),
+  )
+  return delta.sum(dim=-1) * (~lifted)
 
 
 def lifting_reward(env: ManagerBasedRlEnv) -> torch.Tensor:
-  kin = _simtoolreal_kinematics(env)
+  kin = _simtoolreal_kinematics(env, use_object_state_delay_noise=False)
   state = _state(env)
   z_lift = 0.05 + kin["object_pos"][:, 2] - state["initial_object_z"]
   was_lifted = state["lifted_object"].clone()
@@ -444,10 +755,11 @@ def success_bonus(
   steps: int = 10,
   reach_goal_bonus: float = 1000.0,
 ) -> torch.Tensor:
-  kin = _simtoolreal_kinematics(env)
+  kin = _simtoolreal_kinematics(env, use_object_state_delay_noise=False)
   state = _state(env)
-  near = kin["keypoint_max_dist"] <= tolerance * keypoint_scale
+  near = kin["keypoint_max_dist_fixed"] <= tolerance * keypoint_scale
   state["near_goal_steps"] += near.float()
+  state["successes"] += (state["near_goal_steps"] >= steps).float()
   return near.float() * (reach_goal_bonus / steps)
 
 
@@ -464,7 +776,7 @@ def hand_action_penalty(
 
 
 def object_velocity_penalty(env: ManagerBasedRlEnv) -> torch.Tensor:
-  kin = _simtoolreal_kinematics(env)
+  kin = _simtoolreal_kinematics(env, use_object_state_delay_noise=False)
   return -torch.sum(kin["object_lin_vel"] ** 2, dim=-1) - torch.sum(
     kin["object_ang_vel"] ** 2, dim=-1
   )
@@ -491,3 +803,86 @@ def goal_reached(
   del tolerance
   state = _state(env)
   return state["near_goal_steps"] >= steps
+
+
+def apply_random_object_perturbations(
+  env: ManagerBasedRlEnv,
+  env_ids: torch.Tensor | None,
+  force_scale: float = 20.0,
+  torque_scale: float = 2.0,
+  force_decay: float = 0.0,
+  torque_decay: float = 0.0,
+  force_decay_interval: float = 0.08,
+  torque_decay_interval: float = 0.08,
+  force_only_when_lifted: bool = True,
+  torque_only_when_lifted: bool = True,
+  lin_vel_impulse_scale: float = 0.0,
+  ang_vel_impulse_scale: float = 0.0,
+  lin_vel_impulse_only_when_lifted: bool = True,
+  ang_vel_impulse_only_when_lifted: bool = True,
+  asset_cfg: SceneEntityCfg = OBJECT_BODY_CFG,
+) -> None:
+  del env_ids
+  state = _state(env)
+  obj = _object(env)
+  lifted = state["lifted_object"].float()[:, None, None]
+  body_ids = asset_cfg.body_ids
+
+  force_decay_factor = force_decay ** (env.step_dt / force_decay_interval)
+  torque_decay_factor = torque_decay ** (env.step_dt / torque_decay_interval)
+  state["rb_forces"] *= force_decay_factor
+  state["rb_torques"] *= torque_decay_factor
+
+  if force_scale > 0.0:
+    force_mask = torch.rand(env.num_envs, device=env.device) < state["random_force_prob"]
+    if force_mask.any():
+      state["rb_forces"][force_mask] = (
+        torch.randn((int(force_mask.sum().item()), 1, 3), device=env.device)
+        * force_scale
+        * state["object_masses"][force_mask, None, None]
+      )
+    if force_only_when_lifted:
+      state["rb_forces"] *= lifted
+
+  if torque_scale > 0.0:
+    torque_mask = (
+      torch.rand(env.num_envs, device=env.device) < state["random_torque_prob"]
+    )
+    if torque_mask.any():
+      state["rb_torques"][torque_mask] = (
+        torch.randn((int(torque_mask.sum().item()), 1, 3), device=env.device)
+        * torque_scale
+        * state["object_masses"][torque_mask, None, None]
+      )
+    if torque_only_when_lifted:
+      state["rb_torques"] *= lifted
+
+  obj.write_external_wrench_to_sim(
+    state["rb_forces"], state["rb_torques"], body_ids=body_ids
+  )
+
+  velocity = torch.cat([obj.data.root_link_lin_vel_w, obj.data.root_link_ang_vel_w], dim=-1)
+  if lin_vel_impulse_scale > 0.0:
+    lin_mask = (
+      torch.rand(env.num_envs, device=env.device)
+      < state["random_lin_vel_impulse_prob"]
+    )
+    if lin_vel_impulse_only_when_lifted:
+      lin_mask &= state["lifted_object"]
+    velocity[lin_mask, :3] = (
+      torch.randn((int(lin_mask.sum().item()), 3), device=env.device)
+      * lin_vel_impulse_scale
+    )
+  if ang_vel_impulse_scale > 0.0:
+    ang_mask = (
+      torch.rand(env.num_envs, device=env.device)
+      < state["random_ang_vel_impulse_prob"]
+    )
+    if ang_vel_impulse_only_when_lifted:
+      ang_mask &= state["lifted_object"]
+    velocity[ang_mask, 3:6] = (
+      torch.randn((int(ang_mask.sum().item()), 3), device=env.device)
+      * ang_vel_impulse_scale
+    )
+  if lin_vel_impulse_scale > 0.0 or ang_vel_impulse_scale > 0.0:
+    obj.write_root_link_velocity_to_sim(velocity)

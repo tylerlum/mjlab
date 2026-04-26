@@ -37,6 +37,8 @@ def test_simtoolreal_rl_games_configs_build_for_ppo_and_sapg() -> None:
     device="cuda:0",
   )
   assert ppo["params"]["config"]["expl_type"] == "none"
+  assert ppo["params"]["config"]["device"] == "cuda:0"
+  assert ppo["params"]["config"]["device_name"] == "cuda:0"
   assert ppo["params"]["config"]["horizon_length"] == 8
   assert ppo["params"]["config"]["reward_shaper"]["scale_value"] == 0.01
   assert ppo["params"]["network"]["mlp"]["units"] == [1024, 1024, 512, 512]
