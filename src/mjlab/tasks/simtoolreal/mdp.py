@@ -181,6 +181,9 @@ def _state(env: ManagerBasedRlEnv) -> dict[str, torch.Tensor]:
       "initial_object_z": torch.full((env.num_envs,), 0.545, device=env.device),
       "object_masses": torch.full((env.num_envs,), 0.08, device=env.device),
       "table_reset_z": torch.full((env.num_envs,), 0.38, device=env.device),
+      "object_scale_noise_multiplier": torch.ones(
+        env.num_envs, 3, device=env.device
+      ),
       "rb_forces": torch.zeros(env.num_envs, 1, 3, device=env.device),
       "rb_torques": torch.zeros(env.num_envs, 1, 3, device=env.device),
       "random_force_prob": _log_uniform(env, 0.001, 0.1, (env.num_envs,)),
@@ -382,6 +385,16 @@ def reset_simtoolreal_state(env: ManagerBasedRlEnv, env_ids: torch.Tensor | None
   state["successes"][env_ids] = 0.0
   state["lifted_object"][env_ids] = False
   state["just_lifted_object"][env_ids] = False
+  state["rb_forces"][env_ids] = 0.0
+  state["rb_torques"][env_ids] = 0.0
+  state["random_force_prob"][env_ids] = _log_uniform(env, 0.001, 0.1, (len(env_ids),))
+  state["random_torque_prob"][env_ids] = _log_uniform(env, 0.001, 0.1, (len(env_ids),))
+  state["random_lin_vel_impulse_prob"][env_ids] = _log_uniform(
+    env, 0.001, 0.1, (len(env_ids),)
+  )
+  state["random_ang_vel_impulse_prob"][env_ids] = _log_uniform(
+    env, 0.001, 0.1, (len(env_ids),)
+  )
   if state["object_state_queue"] is not None:
     pose_vel = torch.cat(
       [
@@ -408,6 +421,7 @@ def reset_object_uniform(
   reset_position_noise_y: float = 0.1,
   reset_position_noise_z: float = 0.02,
   randomize_object_rotation: bool = True,
+  object_scale_noise_multiplier_range: tuple[float, float] = (1.0, 1.0),
   table_cfg: SceneEntityCfg = TABLE_BODY_CFG,
 ) -> None:
   if env_ids is None:
@@ -441,6 +455,10 @@ def reset_object_uniform(
     quat[:, 0] = 1.0
   obj.write_root_link_pose_to_sim(torch.cat([pos, quat], dim=-1), env_ids=env_ids)
   obj.write_root_link_velocity_to_sim(torch.zeros((len(env_ids), 6), device=env.device), env_ids=env_ids)
+  noise_min, noise_max = object_scale_noise_multiplier_range
+  state["object_scale_noise_multiplier"][env_ids] = torch.empty(
+    (len(env_ids), 3), device=env.device
+  ).uniform_(noise_min, noise_max)
 
 
 def reset_robot_joints_simtoolreal(
@@ -819,9 +837,8 @@ def _simtoolreal_kinematics(
   offsets = signs[None] * (OBJECT_BASE_SIZE * 1.5 * 0.5)
   scales = state["object_scales"]
   if use_object_state_delay_noise:
-    noise_min, noise_max = object_scale_noise_multiplier_range
-    scale_noise = torch.empty_like(scales).uniform_(noise_min, noise_max)
-    scales = scales * scale_noise
+    del object_scale_noise_multiplier_range
+    scales = scales * state["object_scale_noise_multiplier"]
   offsets = offsets * scales[:, None, :]
   object_keypoints = object_pos[:, None, :] + quat_apply(
     object_quat[:, None, :].repeat(1, 4, 1), offsets

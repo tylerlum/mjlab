@@ -81,6 +81,7 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "reset_position_noise_y": 0.0 if play else 0.1,
         "reset_position_noise_z": 0.0 if play else 0.02,
         "randomize_object_rotation": not play,
+        "object_scale_noise_multiplier_range": (1.0, 1.0),
       },
     ),
     "reset_robot_joints": EventTermCfg(
