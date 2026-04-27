@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import shutil
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import mujoco
@@ -91,6 +93,24 @@ def _prepare_robot_mesh_cache() -> Path:
       except OSError:
         shutil.copy2(mesh_path, cache_path)
   return ROBOT_MESH_CACHE
+
+
+def read_robot_urdf_for_viewer() -> str:
+  """Read the robot URDF with mesh files embedded for standalone HTML viewers."""
+  root = ET.fromstring(ROBOT_URDF.read_text(encoding="utf-8"))
+  for mesh in root.findall(".//mesh"):
+    filename = mesh.attrib.get("filename")
+    if not filename:
+      continue
+    path = SIMTOOLREAL_ASSET_ROOT / filename
+    if not path.exists():
+      continue
+    suffix = path.suffix.lower()
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    mesh.attrib["filename"] = (
+      f"data:application/octet-stream;ext={suffix};base64,{encoded}"
+    )
+  return ET.tostring(root, encoding="unicode")
 
 
 def get_iiwa_sharpa_spec() -> mujoco.MjSpec:

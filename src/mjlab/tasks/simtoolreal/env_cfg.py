@@ -189,8 +189,8 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       height=720,
     ),
     sim=SimulationCfg(
-      nconmax=96,
-      njmax=512,
+      nconmax=256,
+      njmax=1024,
       mujoco=MujocoCfg(
         timestep=1.0 / 120.0,
         integrator="implicitfast",

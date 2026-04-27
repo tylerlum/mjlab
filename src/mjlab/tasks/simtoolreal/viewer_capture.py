@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from mjlab.envs import ManagerBasedRlEnv
-from mjlab.tasks.simtoolreal.assets import JOINT_NAMES, ROBOT_URDF
+from mjlab.tasks.simtoolreal.assets import JOINT_NAMES, read_robot_urdf_for_viewer
 from mjlab.tasks.simtoolreal.mdp import N_ACT, OBJECT_BASE_SIZE, _state
 
 
@@ -142,7 +142,7 @@ class SimToolRealViewerCaptureWrapper:
       make_embedded_robot,
     )
 
-    robot_urdf = Path(ROBOT_URDF).read_text(encoding="utf-8")
+    robot_urdf = read_robot_urdf_for_viewer()
     object_size = tuple(
       (OBJECT_BASE_SIZE * _state(self.env)["object_scales"][0]).detach().cpu().tolist()
     )
@@ -179,7 +179,7 @@ class SimToolRealViewerCaptureWrapper:
       ),
       make_embedded_robot(
         name="table",
-        urdf_text=self._box_urdf("table", (0.8, 1.0, 0.02)),
+        urdf_text=self._box_urdf("table", (0.475, 0.4, 0.3)),
         animated=False,
         color_override=(0.6, 0.6, 0.6),
       ),

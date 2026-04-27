@@ -182,9 +182,7 @@ def _state(env: ManagerBasedRlEnv) -> dict[str, torch.Tensor]:
       "initial_object_z": torch.full((env.num_envs,), 0.545, device=env.device),
       "object_masses": torch.full((env.num_envs,), 0.08, device=env.device),
       "table_reset_z": torch.full((env.num_envs,), 0.38, device=env.device),
-      "object_scale_noise_multiplier": torch.ones(
-        env.num_envs, 3, device=env.device
-      ),
+      "object_scale_noise_multiplier": torch.ones(env.num_envs, 3, device=env.device),
       "rb_forces": torch.zeros(env.num_envs, 1, 3, device=env.device),
       "rb_torques": torch.zeros(env.num_envs, 1, 3, device=env.device),
       "random_force_prob": _log_uniform(env, 0.001, 0.1, (env.num_envs,)),
@@ -242,7 +240,9 @@ def _quat_normalize(q: torch.Tensor) -> torch.Tensor:
   return q / torch.linalg.norm(q, dim=-1, keepdim=True).clamp_min(1.0e-8)
 
 
-def _random_small_quat(env: ManagerBasedRlEnv, n: int, max_angle: float) -> torch.Tensor:
+def _random_small_quat(
+  env: ManagerBasedRlEnv, n: int, max_angle: float
+) -> torch.Tensor:
   axis = torch.randn((n, 3), device=env.device)
   axis = axis / torch.linalg.norm(axis, dim=-1, keepdim=True).clamp_min(1.0e-8)
   angle = torch.empty(n, device=env.device).uniform_(-max_angle, max_angle)
@@ -330,9 +330,10 @@ class SimToolRealJointPositionAction(ActionTerm):
     q_lower, q_upper = _q_limits(self._env)
     targets = self.prev_targets.clone()
 
-    hand_targets = 0.5 * (actions_for_targets[:, 7:] + 1.0) * (
-      q_upper[7:] - q_lower[7:]
-    ) + q_lower[7:]
+    hand_targets = (
+      0.5 * (actions_for_targets[:, 7:] + 1.0) * (q_upper[7:] - q_lower[7:])
+      + q_lower[7:]
+    )
     targets[:, 7:] = (
       self.cfg.hand_moving_average * hand_targets
       + (1.0 - self.cfg.hand_moving_average) * self.prev_targets[:, 7:]
@@ -369,7 +370,9 @@ def cache_prev_targets(env: ManagerBasedRlEnv, env_ids: torch.Tensor | None) -> 
     term.prev_targets[:] = term.targets
 
 
-def reset_simtoolreal_state(env: ManagerBasedRlEnv, env_ids: torch.Tensor | None) -> None:
+def reset_simtoolreal_state(
+  env: ManagerBasedRlEnv, env_ids: torch.Tensor | None
+) -> None:
   if env_ids is None:
     env_ids = torch.arange(env.num_envs, device=env.device)
   state = _state(env)
@@ -433,8 +436,10 @@ def reset_object_uniform(
   table_z = table_reset_z + torch.empty(len(env_ids), device=env.device).uniform_(
     -table_reset_z_range, table_reset_z_range
   )
+  table_root_body_id = table.indexing.body_ids[0]
   table_body_ids = table.indexing.body_ids[table_cfg.body_ids]
-  env.sim.model.body_pos[env_ids[:, None], table_body_ids, 2] = table_z[:, None]
+  env.sim.model.body_pos[env_ids, table_root_body_id, 2] = table_z
+  env.sim.model.body_pos[env_ids[:, None], table_body_ids, 2] = 0.0
   state["table_reset_z"][env_ids] = table_z
 
   pos = torch.zeros((len(env_ids), 3), device=env.device)
@@ -455,7 +460,9 @@ def reset_object_uniform(
     quat = torch.zeros((len(env_ids), 4), device=env.device)
     quat[:, 0] = 1.0
   obj.write_root_link_pose_to_sim(torch.cat([pos, quat], dim=-1), env_ids=env_ids)
-  obj.write_root_link_velocity_to_sim(torch.zeros((len(env_ids), 6), device=env.device), env_ids=env_ids)
+  obj.write_root_link_velocity_to_sim(
+    torch.zeros((len(env_ids), 6), device=env.device), env_ids=env_ids
+  )
   noise_min, noise_max = object_scale_noise_multiplier_range
   state["object_scale_noise_multiplier"][env_ids] = torch.empty(
     (len(env_ids), 3), device=env.device
@@ -571,7 +578,9 @@ def sample_handle_head_properties(
     count = int(mask.sum().item())
     h_min_t = torch.tensor(h_min, device=env.device, dtype=torch.float32)
     h_max_t = torch.tensor(h_max, device=env.device, dtype=torch.float32)
-    handle = torch.rand((count, len(h_min)), device=env.device) * (h_max_t - h_min_t) + h_min_t
+    handle = (
+      torch.rand((count, len(h_min)), device=env.device) * (h_max_t - h_min_t) + h_min_t
+    )
     if handle.shape[1] == 2:
       handle = torch.stack([handle[:, 0], handle[:, 1], handle[:, 1]], dim=-1)
     handle_lengths[mask] = handle
@@ -597,7 +606,9 @@ def sample_handle_head_properties(
   return handle_lengths, head_lengths, handle_densities, head_densities
 
 
-def sample_handle_head_equivalent_lengths(env: ManagerBasedRlEnv, n: int) -> torch.Tensor:
+def sample_handle_head_equivalent_lengths(
+  env: ManagerBasedRlEnv, n: int
+) -> torch.Tensor:
   handle_lengths, head_lengths = sample_handle_head_lengths(env, n)
   return torch.stack(
     [
@@ -865,9 +876,9 @@ def _simtoolreal_kinematics(
   keypoints_rel_goal_fixed = object_keypoints_fixed - goal_keypoints_fixed
   keypoint_dist = torch.linalg.norm(keypoints_rel_goal, dim=-1)
   keypoint_max_dist = keypoint_dist.max(dim=-1).values
-  keypoint_max_dist_fixed = torch.linalg.norm(keypoints_rel_goal_fixed, dim=-1).max(
-    dim=-1
-  ).values
+  keypoint_max_dist_fixed = (
+    torch.linalg.norm(keypoints_rel_goal_fixed, dim=-1).max(dim=-1).values
+  )
   fingertip_dist = torch.linalg.norm(fingertip_pos - object_pos[:, None, :], dim=-1)
 
   joint_vel = robot.data.joint_vel[:, :N_ACT]
@@ -895,7 +906,7 @@ def _simtoolreal_kinematics(
     "fingertip_dist": fingertip_dist,
     "object_pos": object_pos,
     "object_lin_vel": object_lin_vel,
-  "object_ang_vel": object_ang_vel,
+    "object_ang_vel": object_ang_vel,
   }
 
 
@@ -1088,15 +1099,11 @@ def reset_successful_goals(
   env.sim.forward()
 
 
-def kuka_action_penalty(
-  env: ManagerBasedRlEnv, scale: float = 0.03
-) -> torch.Tensor:
+def kuka_action_penalty(env: ManagerBasedRlEnv, scale: float = 0.03) -> torch.Tensor:
   return -scale * torch.sum(torch.abs(_robot(env).data.joint_vel[:, :7]), dim=-1)
 
 
-def hand_action_penalty(
-  env: ManagerBasedRlEnv, scale: float = 0.003
-) -> torch.Tensor:
+def hand_action_penalty(env: ManagerBasedRlEnv, scale: float = 0.003) -> torch.Tensor:
   return -scale * torch.sum(torch.abs(_robot(env).data.joint_vel[:, 7:N_ACT]), dim=-1)
 
 
@@ -1111,7 +1118,9 @@ def object_fell(env: ManagerBasedRlEnv) -> torch.Tensor:
   return _object(env).data.root_link_pos_w[:, 2] < 0.1
 
 
-def hand_far_from_object(env: ManagerBasedRlEnv, threshold: float = 1.5) -> torch.Tensor:
+def hand_far_from_object(
+  env: ManagerBasedRlEnv, threshold: float = 1.5
+) -> torch.Tensor:
   robot = _robot(env)
   obj = _object(env)
   fingertip_pos, fingertip_quat = _body_pose(robot, FINGERTIP_BODIES)
@@ -1166,7 +1175,9 @@ def apply_random_object_perturbations(
   state["rb_torques"] *= torque_decay_factor
 
   if force_scale > 0.0:
-    force_mask = torch.rand(env.num_envs, device=env.device) < state["random_force_prob"]
+    force_mask = (
+      torch.rand(env.num_envs, device=env.device) < state["random_force_prob"]
+    )
     if force_mask.any():
       state["rb_forces"][force_mask] = (
         torch.randn((int(force_mask.sum().item()), 1, 3), device=env.device)
@@ -1193,11 +1204,12 @@ def apply_random_object_perturbations(
     state["rb_forces"], state["rb_torques"], body_ids=body_ids
   )
 
-  velocity = torch.cat([obj.data.root_link_lin_vel_w, obj.data.root_link_ang_vel_w], dim=-1)
+  velocity = torch.cat(
+    [obj.data.root_link_lin_vel_w, obj.data.root_link_ang_vel_w], dim=-1
+  )
   if lin_vel_impulse_scale > 0.0:
     lin_mask = (
-      torch.rand(env.num_envs, device=env.device)
-      < state["random_lin_vel_impulse_prob"]
+      torch.rand(env.num_envs, device=env.device) < state["random_lin_vel_impulse_prob"]
     )
     if lin_vel_impulse_only_when_lifted:
       lin_mask &= state["lifted_object"]
@@ -1207,8 +1219,7 @@ def apply_random_object_perturbations(
     )
   if ang_vel_impulse_scale > 0.0:
     ang_mask = (
-      torch.rand(env.num_envs, device=env.device)
-      < state["random_ang_vel_impulse_prob"]
+      torch.rand(env.num_envs, device=env.device) < state["random_ang_vel_impulse_prob"]
     )
     if ang_vel_impulse_only_when_lifted:
       ang_mask &= state["lifted_object"]

@@ -12,7 +12,7 @@ import numpy as np
 
 from mjlab.tasks.simtoolreal import SimToolRealOnnxPolicy
 from mjlab.tasks.simtoolreal import policy as policy_module
-from mjlab.tasks.simtoolreal.assets import JOINT_NAMES, ROBOT_URDF
+from mjlab.tasks.simtoolreal.assets import JOINT_NAMES, read_robot_urdf_for_viewer
 from mjlab.tasks.simtoolreal.interactive_viewer import create_html, make_embedded_robot
 
 MJLAB_ROOT = Path(__file__).resolve().parents[2]
@@ -36,9 +36,15 @@ class ObjectVariant:
 
 
 VARIANTS = (
-  ObjectVariant("hammer_box", (0.20, 0.03, 0.02), (0.05, 0.09, 0.04), (0.00, 0.05, 0.82)),
-  ObjectVariant("screwdriver_box", (0.10, 0.035, 0.035), (0.12, 0.012, 0.012), (0.08, -0.02, 0.78)),
-  ObjectVariant("spatula_box", (0.16, 0.02, 0.012), (0.10, 0.06, 0.02), (-0.08, 0.08, 0.80)),
+  ObjectVariant(
+    "hammer_box", (0.20, 0.03, 0.02), (0.05, 0.09, 0.04), (0.00, 0.05, 0.82)
+  ),
+  ObjectVariant(
+    "screwdriver_box", (0.10, 0.035, 0.035), (0.12, 0.012, 0.012), (0.08, -0.02, 0.78)
+  ),
+  ObjectVariant(
+    "spatula_box", (0.16, 0.02, 0.012), (0.10, 0.06, 0.02), (-0.08, 0.08, 0.80)
+  ),
 )
 
 
@@ -124,7 +130,9 @@ def _set_variant(model: mujoco.MjModel, variant: ObjectVariant) -> None:
     model.geom_size[geom_id, 0] = radius
     model.geom_size[geom_id, 1] = max(0.5 * variant.head[0] - radius, 1.0e-4)
     model.geom_pos[geom_id, :3] = (head_center_x, 0.0, 0.0)
-  policy_module.OBJECT_SCALES[:] = np.asarray(variant.bbox, dtype=np.float32) / policy_module.OBJECT_BASE_SIZE
+  policy_module.OBJECT_SCALES[:] = (
+    np.asarray(variant.bbox, dtype=np.float32) / policy_module.OBJECT_BASE_SIZE
+  )
 
 
 def _reset_object_goal(
@@ -173,7 +181,9 @@ def _rollout_variant(
       policy.apply_control(data)
       mujoco.mj_step(model, data)
     robot_joint_pos.append(data.qpos[: policy_module.N_ACT].copy())
-    robot_base_pose.append(np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], dtype=np.float32))
+    robot_base_pose.append(
+      np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+    )
     object_pose.append(_pose_xyzw(data.xpos[object_body], data.xquat[object_body]))
     goal_pose.append(_pose_xyzw(data.xpos[goal_body], data.xquat[goal_body]))
     table_pose.append(_pose_xyzw(data.xpos[table_body], data.xquat[table_body]))
@@ -181,7 +191,7 @@ def _rollout_variant(
   robots = [
     make_embedded_robot(
       name="robot",
-      urdf_text=ROBOT_URDF.read_text(encoding="utf-8"),
+      urdf_text=read_robot_urdf_for_viewer(),
       animated=True,
     ),
     make_embedded_robot(
