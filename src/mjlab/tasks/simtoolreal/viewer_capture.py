@@ -101,6 +101,40 @@ class SimToolRealViewerCaptureWrapper:
   </link>
 </robot>"""
 
+  def _handle_head_urdf(
+    self,
+    name: str,
+    handle_size: tuple[float, float, float],
+    head_size: tuple[float, float, float],
+  ) -> str:
+    hx, hy, hz = handle_size
+    tx, ty, tz = head_size
+    if tx <= 1.0e-5:
+      return self._box_urdf(name, handle_size)
+    total_x = hx + tx
+    handle_x = -0.5 * total_x + 0.5 * hx
+    head_x = 0.5 * total_x - 0.5 * tx
+    return f"""<robot name="{name}">
+  <link name="{name}">
+    <visual>
+      <origin xyz="{handle_x} 0 0"/>
+      <geometry><box size="{hx} {hy} {hz}"/></geometry>
+    </visual>
+    <visual>
+      <origin xyz="{head_x} 0 0"/>
+      <geometry><box size="{tx} {ty} {tz}"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="{handle_x} 0 0"/>
+      <geometry><box size="{hx} {hy} {hz}"/></geometry>
+    </collision>
+    <collision>
+      <origin xyz="{head_x} 0 0"/>
+      <geometry><box size="{tx} {ty} {tz}"/></geometry>
+    </collision>
+  </link>
+</robot>"""
+
   def _finalize_capture(self) -> None:
     assert self._frames is not None
     from mjlab.tasks.simtoolreal.interactive_viewer import (
@@ -110,10 +144,20 @@ class SimToolRealViewerCaptureWrapper:
 
     robot_urdf = Path(ROBOT_URDF).read_text(encoding="utf-8")
     object_size = tuple(
-      (OBJECT_BASE_SIZE * _state(self.env)["object_scales"][0])
-      .detach()
-      .cpu()
-      .tolist()
+      (OBJECT_BASE_SIZE * _state(self.env)["object_scales"][0]).detach().cpu().tolist()
+    )
+    sim_state = _state(self.env)
+    handle_size = tuple(sim_state["handle_lengths"][0].detach().cpu().tolist())
+    head_size = tuple(sim_state["head_lengths"][0].detach().cpu().tolist())
+    object_urdf = (
+      self._handle_head_urdf("object", handle_size, head_size)
+      if any(x > 1.0e-5 for x in head_size)
+      else self._box_urdf("object", object_size)
+    )
+    goal_urdf = (
+      self._handle_head_urdf("goal", handle_size, head_size)
+      if any(x > 1.0e-5 for x in head_size)
+      else self._box_urdf("goal", object_size)
     )
     robots = [
       make_embedded_robot(
@@ -123,13 +167,13 @@ class SimToolRealViewerCaptureWrapper:
       ),
       make_embedded_robot(
         name="object",
-        urdf_text=self._box_urdf("object", object_size),
+        urdf_text=object_urdf,
         animated=False,
         color_override=(0.1, 0.45, 0.95),
       ),
       make_embedded_robot(
         name="goal",
-        urdf_text=self._box_urdf("goal", object_size),
+        urdf_text=goal_urdf,
         animated=False,
         color_override=(0.1, 0.8, 0.25),
       ),
