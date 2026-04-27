@@ -57,6 +57,9 @@ def test_simtoolreal_training_cfg_matches_source_cadence_and_randomization() -> 
   assert cfg.actions["joint_pos"].use_action_delay
   assert cfg.actions["joint_pos"].action_delay_max == 3
   assert cfg.events["randomize_object_size"].func is mdp.randomize_handle_head_equivalent_size
+  assert cfg.events["reset_object"].params["table_reset_z"] == pytest.approx(0.38)
+  assert cfg.events["reset_object"].params["table_reset_z_range"] == pytest.approx(0.01)
+  assert cfg.events["reset_robot_joints"].func is mdp.reset_robot_joints_simtoolreal
   assert cfg.events["reset_successful_goals"].func is mdp.reset_successful_goals
   assert cfg.events["random_object_perturbations"].func is mdp.apply_random_object_perturbations
   assert "goal_reached" not in cfg.terminations
@@ -111,11 +114,13 @@ def test_simtoolreal_success_resamples_goal_without_episode_termination() -> Non
     state = mdp._state(env)
     state["reset_goal_buf"][0] = True
     state["near_goal_steps"][0] = 10.0
+    env.episode_length_buf[0] = 123
     old_goal = env.scene["goal"].data.root_link_pos_w[0].clone()
     mdp.reset_successful_goals(env, None)
     new_goal = env.scene["goal"].data.root_link_pos_w[0]
     assert not state["reset_goal_buf"][0]
     assert state["near_goal_steps"][0] == 0.0
+    assert env.episode_length_buf[0] == 0
     assert not torch.allclose(old_goal, new_goal)
   finally:
     env.close()

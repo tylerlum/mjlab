@@ -74,11 +74,22 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       params={
         "x_range": (0.0, 0.0),
         "y_range": (0.05, 0.05),
-        "table_surface_z": 0.53,
+        "table_reset_z": 0.38,
+        "table_reset_z_range": 0.0 if play else 0.01,
+        "table_object_z_offset": 0.25,
         "reset_position_noise_x": 0.0 if play else 0.1,
         "reset_position_noise_y": 0.0 if play else 0.1,
         "reset_position_noise_z": 0.0 if play else 0.02,
         "randomize_object_rotation": not play,
+      },
+    ),
+    "reset_robot_joints": EventTermCfg(
+      func=mdp.reset_robot_joints_simtoolreal,
+      mode="reset",
+      params={
+        "arm_pos_noise": 0.0 if play else 0.1,
+        "finger_pos_noise": 0.0 if play else 0.1,
+        "vel_noise": 0.0 if play else 0.5,
       },
     ),
     "reset_goal": EventTermCfg(

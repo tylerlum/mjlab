@@ -41,11 +41,13 @@ OBJECT_GEOM_CFG = SceneEntityCfg(
 OBJECT_HANDLE_GEOM_CFG = SceneEntityCfg("object", geom_names=("object_handle_geom",))
 OBJECT_HEAD_GEOM_CFG = SceneEntityCfg("object", geom_names=("object_head_geom",))
 OBJECT_BODY_CFG = SceneEntityCfg("object", body_names=("object",))
+TABLE_BODY_CFG = SceneEntityCfg("table", body_names=("table_object",))
 GOAL_GEOM_CFG = SceneEntityCfg(
   "goal", geom_names=("goal_handle_geom", "goal_head_geom")
 )
 GOAL_HANDLE_GEOM_CFG = SceneEntityCfg("goal", geom_names=("goal_handle_geom",))
 GOAL_HEAD_GEOM_CFG = SceneEntityCfg("goal", geom_names=("goal_head_geom",))
+ROBOT_JOINT_CFG = SceneEntityCfg("robot", joint_names=JOINT_NAMES)
 
 HANDLE_HEAD_DISTRIBUTIONS = (
   ((0.15, 0.02, 0.015), (0.30, 0.04, 0.03), (0.02, 0.05, 0.02), (0.06, 0.12, 0.06)),
@@ -60,6 +62,22 @@ HANDLE_HEAD_DISTRIBUTIONS = (
   ((0.05, 0.01), (0.20, 0.03), (0.05, 0.03, 0.03), (0.12, 0.05, 0.08)),
   ((0.05, 0.01, 0.01), (0.20, 0.04, 0.03), (0.05, 0.05, 0.02), (0.12, 0.12, 0.04)),
   ((0.05, 0.01), (0.20, 0.03), (0.05, 0.05, 0.02), (0.12, 0.12, 0.04)),
+)
+LOW_DENSITY_RANGE = (300.0, 600.0)
+HIGH_DENSITY_RANGE = (800.0, 2000.0)
+HANDLE_HEAD_DENSITY_RANGES = (
+  (*LOW_DENSITY_RANGE, *HIGH_DENSITY_RANGE),
+  (*LOW_DENSITY_RANGE, *HIGH_DENSITY_RANGE),
+  (*LOW_DENSITY_RANGE, *HIGH_DENSITY_RANGE),
+  (*LOW_DENSITY_RANGE, *HIGH_DENSITY_RANGE),
+  (*LOW_DENSITY_RANGE, *LOW_DENSITY_RANGE),
+  (*LOW_DENSITY_RANGE, *LOW_DENSITY_RANGE),
+  (*LOW_DENSITY_RANGE, *LOW_DENSITY_RANGE),
+  (*LOW_DENSITY_RANGE, 0.0, 0.0),
+  (*LOW_DENSITY_RANGE, *LOW_DENSITY_RANGE),
+  (*LOW_DENSITY_RANGE, *LOW_DENSITY_RANGE),
+  (*LOW_DENSITY_RANGE, *LOW_DENSITY_RANGE),
+  (*LOW_DENSITY_RANGE, *LOW_DENSITY_RANGE),
 )
 
 Q_LOWER = torch.tensor(
@@ -162,6 +180,7 @@ def _state(env: ManagerBasedRlEnv) -> dict[str, torch.Tensor]:
       ),
       "initial_object_z": torch.full((env.num_envs,), 0.545, device=env.device),
       "object_masses": torch.full((env.num_envs,), 0.08, device=env.device),
+      "table_reset_z": torch.full((env.num_envs,), 0.38, device=env.device),
       "rb_forces": torch.zeros(env.num_envs, 1, 3, device=env.device),
       "rb_torques": torch.zeros(env.num_envs, 1, 3, device=env.device),
       "random_force_prob": _log_uniform(env, 0.001, 0.1, (env.num_envs,)),
@@ -244,6 +263,10 @@ def _object(env: ManagerBasedRlEnv) -> Entity:
 
 def _goal(env: ManagerBasedRlEnv) -> Entity:
   return env.scene["goal"]
+
+
+def _table(env: ManagerBasedRlEnv) -> Entity:
+  return env.scene["table"]
 
 
 @dataclass(kw_only=True)
@@ -371,28 +394,39 @@ def reset_simtoolreal_state(env: ManagerBasedRlEnv, env_ids: torch.Tensor | None
     state["object_state_queue"][env_ids] = pose_vel[:, None, :]
 
 
+@requires_model_fields("body_pos", recompute=RecomputeLevel.set_const_0)
 def reset_object_uniform(
   env: ManagerBasedRlEnv,
   env_ids: torch.Tensor | None,
   x_range: tuple[float, float] = (-0.04, 0.04),
   y_range: tuple[float, float] = (0.02, 0.08),
   z: float | None = None,
-  table_surface_z: float = 0.53,
+  table_reset_z: float = 0.38,
+  table_reset_z_range: float = 0.01,
+  table_object_z_offset: float = 0.25,
   reset_position_noise_x: float = 0.1,
   reset_position_noise_y: float = 0.1,
   reset_position_noise_z: float = 0.02,
   randomize_object_rotation: bool = True,
+  table_cfg: SceneEntityCfg = TABLE_BODY_CFG,
 ) -> None:
   if env_ids is None:
     env_ids = torch.arange(env.num_envs, device=env.device)
   obj = _object(env)
+  table = _table(env)
   state = _state(env)
+  table_z = table_reset_z + torch.empty(len(env_ids), device=env.device).uniform_(
+    -table_reset_z_range, table_reset_z_range
+  )
+  table_body_ids = table.indexing.body_ids[table_cfg.body_ids]
+  env.sim.model.body_pos[env_ids[:, None], table_body_ids, 2] = table_z[:, None]
+  state["table_reset_z"][env_ids] = table_z
+
   pos = torch.zeros((len(env_ids), 3), device=env.device)
   pos[:, 0] = torch.empty(len(env_ids), device=env.device).uniform_(*x_range)
   pos[:, 1] = torch.empty(len(env_ids), device=env.device).uniform_(*y_range)
   if z is None:
-    object_lengths = OBJECT_BASE_SIZE * state["object_scales"][env_ids]
-    pos[:, 2] = table_surface_z + 0.5 * object_lengths[:, 2] + 0.002
+    pos[:, 2] = table_z + table_object_z_offset
   else:
     pos[:, 2] = z
   rand = torch.empty((len(env_ids), 3), device=env.device).uniform_(-1.0, 1.0)
@@ -409,33 +443,107 @@ def reset_object_uniform(
   obj.write_root_link_velocity_to_sim(torch.zeros((len(env_ids), 6), device=env.device), env_ids=env_ids)
 
 
+def reset_robot_joints_simtoolreal(
+  env: ManagerBasedRlEnv,
+  env_ids: torch.Tensor | None,
+  arm_pos_noise: float = 0.1,
+  finger_pos_noise: float = 0.1,
+  vel_noise: float = 0.5,
+  asset_cfg: SceneEntityCfg = ROBOT_JOINT_CFG,
+) -> None:
+  if env_ids is None:
+    env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
+  else:
+    env_ids = env_ids.to(env.device, dtype=torch.int)
+  robot = _robot(env)
+  q_lower, q_upper = _q_limits(env)
+  joint_ids = robot.indexing.joint_ids[asset_cfg.joint_ids]
+  default = robot.data.default_joint_pos[env_ids][:, joint_ids].clone()
+  delta_min = q_lower - default
+  delta_max = q_upper - default
+  rand = torch.rand((len(env_ids), N_ACT), device=env.device)
+  rand_delta = delta_min + (delta_max - delta_min) * rand
+  noise_coeff = torch.empty(N_ACT, device=env.device)
+  noise_coeff[:7] = arm_pos_noise
+  noise_coeff[7:] = finger_pos_noise
+  joint_pos = torch.clamp(default + noise_coeff * rand_delta, q_lower, q_upper)
+  joint_vel = torch.empty((len(env_ids), N_ACT), device=env.device).uniform_(
+    -vel_noise, vel_noise
+  )
+  robot.write_joint_state_to_sim(
+    joint_pos,
+    joint_vel,
+    joint_ids=joint_ids,
+    env_ids=env_ids,
+  )
+  term = env.action_manager.get_term("joint_pos")
+  if isinstance(term, SimToolRealJointPositionAction):
+    term.prev_targets[env_ids] = joint_pos
+    term.targets[env_ids] = joint_pos
+
+
 def reset_goal_uniform(
   env: ManagerBasedRlEnv,
   env_ids: torch.Tensor | None,
-  x_range: tuple[float, float] = (-0.12, 0.12),
-  y_range: tuple[float, float] = (-0.02, 0.18),
-  z_range: tuple[float, float] = (0.68, 0.95),
+  x_range: tuple[float, float] = (-0.35, 0.35),
+  y_range: tuple[float, float] = (-0.2, 0.2),
+  z_range: tuple[float, float] = (0.6, 0.95),
+  is_first_goal: bool = True,
+  goal_sampling_type: str = "delta",
+  delta_goal_distance: float = 0.1,
+  delta_rotation_degrees: float = 90.0,
 ) -> None:
   if env_ids is None:
     env_ids = torch.arange(env.num_envs, device=env.device)
   goal = _goal(env)
-  pos = torch.zeros((len(env_ids), 3), device=env.device)
-  pos[:, 0] = torch.empty(len(env_ids), device=env.device).uniform_(*x_range)
-  pos[:, 1] = torch.empty(len(env_ids), device=env.device).uniform_(*y_range)
-  pos[:, 2] = torch.empty(len(env_ids), device=env.device).uniform_(*z_range)
+  if not is_first_goal and goal_sampling_type == "delta":
+    pos = goal.data.root_link_pos_w[env_ids].clone() - env.scene.env_origins[env_ids]
+    delta = torch.empty((len(env_ids), 3), device=env.device).uniform_(
+      -delta_goal_distance, delta_goal_distance
+    )
+    pos = pos + delta
+    mins = torch.tensor([x_range[0], y_range[0], z_range[0]], device=env.device)
+    maxs = torch.tensor([x_range[1], y_range[1], z_range[1]], device=env.device)
+    pos = torch.clamp(pos, mins, maxs)
+    delta_quat = _random_small_quat(
+      env, len(env_ids), math.radians(delta_rotation_degrees)
+    )
+    quat = _quat_normalize(_quat_mul(goal.data.root_link_quat_w[env_ids], delta_quat))
+  else:
+    pos = torch.zeros((len(env_ids), 3), device=env.device)
+    pos[:, 0] = torch.empty(len(env_ids), device=env.device).uniform_(*x_range)
+    pos[:, 1] = torch.empty(len(env_ids), device=env.device).uniform_(*y_range)
+    pos[:, 2] = torch.empty(len(env_ids), device=env.device).uniform_(*z_range)
+    roll = torch.empty(len(env_ids), device=env.device).uniform_(-math.pi, math.pi)
+    pitch = torch.empty(len(env_ids), device=env.device).uniform_(-math.pi, math.pi)
+    yaw = torch.empty(len(env_ids), device=env.device).uniform_(-math.pi, math.pi)
+    quat = quat_from_euler_xyz(roll, pitch, yaw)
+  min_z = (
+    _object(env).data.root_link_pos_w[env_ids, 2]
+    - env.scene.env_origins[env_ids, 2]
+    - 0.05
+    + 0.15
+  )
+  if is_first_goal or goal_sampling_type not in {"delta", "coin_flip"}:
+    pos[:, 2] = torch.maximum(pos[:, 2], min_z)
   pos += env.scene.env_origins[env_ids]
-  roll = torch.empty(len(env_ids), device=env.device).uniform_(-math.pi, math.pi)
-  pitch = torch.empty(len(env_ids), device=env.device).uniform_(-math.pi, math.pi)
-  yaw = torch.empty(len(env_ids), device=env.device).uniform_(-math.pi, math.pi)
-  quat = quat_from_euler_xyz(roll, pitch, yaw)
   goal.write_mocap_pose_to_sim(torch.cat([pos, quat], dim=-1), env_ids=env_ids)
 
 
 def sample_handle_head_lengths(
   env: ManagerBasedRlEnv, n: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
+  handle_lengths, head_lengths, _, _ = sample_handle_head_properties(env, n)
+  return handle_lengths, head_lengths
+
+
+def sample_handle_head_properties(
+  env: ManagerBasedRlEnv, n: int
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
   handle_lengths = torch.zeros((n, 3), device=env.device)
   head_lengths = torch.zeros((n, 3), device=env.device)
+  handle_densities = torch.zeros(n, device=env.device)
+  head_densities = torch.zeros(n, device=env.device)
   choices = torch.randint(0, len(HANDLE_HEAD_DISTRIBUTIONS), (n,), device=env.device)
   for i, (h_min, h_max, head_min, head_max) in enumerate(HANDLE_HEAD_DISTRIBUTIONS):
     mask = choices == i
@@ -448,8 +556,15 @@ def sample_handle_head_lengths(
     if handle.shape[1] == 2:
       handle = torch.stack([handle[:, 0], handle[:, 1], handle[:, 1]], dim=-1)
     handle_lengths[mask] = handle
+    h_density_min, h_density_max, head_density_min, head_density_max = (
+      HANDLE_HEAD_DENSITY_RANGES[i]
+    )
+    handle_densities[mask] = torch.empty(count, device=env.device).uniform_(
+      h_density_min, h_density_max
+    )
     if head_min is None or head_max is None:
       head_lengths[mask] = 0.0
+      head_densities[mask] = 0.0
     else:
       head_min_t = torch.tensor(head_min, device=env.device, dtype=torch.float32)
       head_max_t = torch.tensor(head_max, device=env.device, dtype=torch.float32)
@@ -457,7 +572,10 @@ def sample_handle_head_lengths(
         torch.rand((count, 3), device=env.device) * (head_max_t - head_min_t)
         + head_min_t
       )
-  return handle_lengths, head_lengths
+      head_densities[mask] = torch.empty(count, device=env.device).uniform_(
+        head_density_min, head_density_max
+      )
+  return handle_lengths, head_lengths, handle_densities, head_densities
 
 
 def sample_handle_head_equivalent_lengths(env: ManagerBasedRlEnv, n: int) -> torch.Tensor:
@@ -470,39 +588,6 @@ def sample_handle_head_equivalent_lengths(env: ManagerBasedRlEnv, n: int) -> tor
     ],
     dim=-1,
   )
-
-
-def _legacy_sample_handle_head_equivalent_lengths(
-  env: ManagerBasedRlEnv, n: int
-) -> torch.Tensor:
-  lengths = torch.zeros((n, 3), device=env.device)
-  choices = torch.randint(0, len(HANDLE_HEAD_DISTRIBUTIONS), (n,), device=env.device)
-  for i, (h_min, h_max, head_min, head_max) in enumerate(HANDLE_HEAD_DISTRIBUTIONS):
-    mask = choices == i
-    if not mask.any():
-      continue
-    count = int(mask.sum().item())
-    h_min_t = torch.tensor(h_min, device=env.device, dtype=torch.float32)
-    h_max_t = torch.tensor(h_max, device=env.device, dtype=torch.float32)
-    handle = torch.rand((count, len(h_min)), device=env.device) * (h_max_t - h_min_t) + h_min_t
-    if handle.shape[1] == 2:
-      handle = torch.stack([handle[:, 0], handle[:, 1], handle[:, 1]], dim=-1)
-    if head_min is None or head_max is None:
-      total = handle
-    else:
-      head_min_t = torch.tensor(head_min, device=env.device, dtype=torch.float32)
-      head_max_t = torch.tensor(head_max, device=env.device, dtype=torch.float32)
-      head = torch.rand((count, 3), device=env.device) * (head_max_t - head_min_t) + head_min_t
-      total = torch.stack(
-        [
-          handle[:, 0] + head[:, 0],
-          torch.maximum(handle[:, 1], head[:, 1]),
-          torch.maximum(handle[:, 2], head[:, 2]),
-        ],
-        dim=-1,
-      )
-    lengths[mask] = total
-  return lengths
 
 
 @requires_model_fields("geom_size", "geom_rbound", "geom_aabb")
@@ -550,7 +635,7 @@ def randomize_simple_cuboid_size(
 def randomize_handle_head_equivalent_size(
   env: ManagerBasedRlEnv,
   env_ids: torch.Tensor | None,
-  density: float = 400.0,
+  density: float | None = None,
   asset_cfg: SceneEntityCfg = OBJECT_GEOM_CFG,
   goal_asset_cfg: SceneEntityCfg = GOAL_GEOM_CFG,
   body_cfg: SceneEntityCfg = OBJECT_BODY_CFG,
@@ -559,7 +644,16 @@ def randomize_handle_head_equivalent_size(
     env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
   else:
     env_ids = env_ids.to(env.device, dtype=torch.int)
-  handle_lengths, head_lengths = sample_handle_head_lengths(env, len(env_ids))
+  handle_lengths, head_lengths, handle_densities, head_densities = (
+    sample_handle_head_properties(env, len(env_ids))
+  )
+  if density is not None:
+    handle_densities[:] = density
+    head_densities = torch.where(
+      head_lengths[:, 0] > 0.0,
+      torch.full_like(head_densities, density),
+      torch.zeros_like(head_densities),
+    )
   lengths = torch.stack(
     [
       handle_lengths[:, 0] + head_lengths[:, 0],
@@ -592,8 +686,8 @@ def randomize_handle_head_equivalent_size(
   _recompute_geom_bounds(env, env_ids=env_ids, asset_cfg=goal_asset_cfg)
 
   body_ids = obj.indexing.body_ids[body_cfg.body_ids]
-  handle_mass = density * torch.prod(handle_lengths, dim=-1)
-  head_mass = density * torch.prod(head_lengths, dim=-1)
+  handle_mass = handle_densities * torch.prod(handle_lengths, dim=-1)
+  head_mass = head_densities * torch.prod(head_lengths, dim=-1)
   mass = (handle_mass + head_mass).clamp_min(1.0e-6)
   com_x = (handle_mass * handle_centers[:, 0] + head_mass * head_centers[:, 0]) / mass
   handle_dx = handle_centers[:, 0] - com_x
@@ -633,7 +727,7 @@ def randomize_handle_head_equivalent_size(
 def randomize_handle_head_size(
   env: ManagerBasedRlEnv,
   env_ids: torch.Tensor | None,
-  density: float = 400.0,
+  density: float | None = None,
   asset_cfg: SceneEntityCfg = OBJECT_GEOM_CFG,
   goal_asset_cfg: SceneEntityCfg = GOAL_GEOM_CFG,
   body_cfg: SceneEntityCfg = OBJECT_BODY_CFG,
@@ -909,11 +1003,12 @@ def reset_successful_goals(
   state["reset_goal_buf"] &= state["successes"] >= max_consecutive_successes
   if len(reset_goal_env_ids) == 0:
     return
-  reset_goal_uniform(env, reset_goal_env_ids)
+  reset_goal_uniform(env, reset_goal_env_ids, is_first_goal=False)
   state["reset_goal_buf"][reset_goal_env_ids] = False
   state["near_goal_steps"][reset_goal_env_ids] = 0.0
   state["closest_keypoint_max_dist"][reset_goal_env_ids] = float("inf")
   state["closest_keypoint_max_dist_fixed_size"][reset_goal_env_ids] = float("inf")
+  env.episode_length_buf[reset_goal_env_ids] = 0
   env.scene.write_data_to_sim()
   env.sim.forward()
 
