@@ -34,7 +34,7 @@ class SimToolRealTrainCli:
   backend: BackendName = "rsl_rl"
   """Training backend to use."""
 
-  num_envs: int = 1024
+  num_envs: int = 8192
   """Number of vectorized MJLab environments."""
 
   device: str = "cuda:0"

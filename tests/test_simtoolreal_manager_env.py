@@ -9,7 +9,7 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.tasks.registry import list_tasks, load_env_cfg
 from mjlab.tasks.simtoolreal import mdp
 from mjlab.tasks.simtoolreal.assets import ROBOT_URDF
-from mjlab.tasks.simtoolreal.mdp import N_ACT, N_OBS
+from mjlab.tasks.simtoolreal.mdp import N_ACT, N_OBS, N_STATE
 
 TASK_ID = "Mjlab-SimToolReal-Iiwa-Sharpa-SimpleCuboid"
 
@@ -32,14 +32,24 @@ def test_simtoolreal_manager_env_reset_step_smoke() -> None:
   try:
     obs, _ = env.reset()
     assert obs["actor"].shape == (2, N_OBS)
+    assert obs["critic"].shape == (2, N_STATE)
     assert torch.isfinite(obs["actor"]).all()
+    assert torch.isfinite(obs["critic"]).all()
     assert env.action_manager.total_action_dim == N_ACT
+    action_term = env.action_manager.get_term("joint_pos")
+    robot = env.scene["robot"]
+    torch.testing.assert_close(
+      action_term.prev_targets,
+      robot.data.joint_pos[:, action_term._joint_ids],
+    )
 
     action = torch.zeros((env.num_envs, N_ACT), device=env.device)
     obs, reward, terminated, truncated, _ = env.step(action)
 
     assert obs["actor"].shape == (2, N_OBS)
+    assert obs["critic"].shape == (2, N_STATE)
     assert torch.isfinite(obs["actor"]).all()
+    assert torch.isfinite(obs["critic"]).all()
     assert torch.isfinite(reward).all()
     assert not terminated.any()
     assert not truncated.any()
@@ -50,6 +60,7 @@ def test_simtoolreal_manager_env_reset_step_smoke() -> None:
 def test_simtoolreal_training_cfg_matches_source_cadence_and_randomization() -> None:
   cfg = load_env_cfg(TASK_ID, play=False)
 
+  assert cfg.scene.num_envs == 8192
   assert cfg.sim.mujoco.timestep == pytest.approx(1.0 / 120.0)
   assert cfg.decimation == 2
   assert cfg.episode_length_s == pytest.approx(10.0)

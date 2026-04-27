@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from mjlab.rl.simtoolreal_backend_cfg import (
+  N_STATE,
   SimToolRealAltRunnerCfg,
   make_rl_games_config,
   make_simple_rl_configs,
@@ -18,7 +19,11 @@ def test_simtoolreal_simple_rl_configs_build_for_ppo_and_sapg() -> None:
   assert network_cfg.rnn is not None
   assert network_cfg.rnn.name == "lstm"
   assert ppo_cfg.reward_shaper.scale_value == 0.01
+  assert ppo_cfg.minibatch_size == 98_304
+  assert ppo_cfg.mini_epochs == 2
   assert ppo_cfg.asymmetric_critic is not None
+  assert ppo_cfg.asymmetric_critic.minibatch_size == 98_304
+  assert N_STATE == 162
 
   sapg_cfg, _ = make_simple_rl_configs(
     SimToolRealAltRunnerCfg(algorithm="sapg", horizon_length=8, max_epochs=1),
@@ -41,9 +46,12 @@ def test_simtoolreal_rl_games_configs_build_for_ppo_and_sapg() -> None:
   assert ppo["params"]["config"]["device_name"] == "cuda:0"
   assert ppo["params"]["config"]["horizon_length"] == 8
   assert ppo["params"]["config"]["reward_shaper"]["scale_value"] == 0.01
+  assert ppo["params"]["config"]["minibatch_size"] == 98_304
+  assert ppo["params"]["config"]["mini_epochs"] == 2
   assert ppo["params"]["network"]["mlp"]["units"] == [1024, 1024, 512, 512]
   assert ppo["params"]["network"]["rnn"]["name"] == "lstm"
   assert ppo["params"]["config"]["central_value_config"] is not None
+  assert ppo["params"]["config"]["central_value_config"]["minibatch_size"] == 98_304
 
   sapg = make_rl_games_config(
     SimToolRealAltRunnerCfg(algorithm="sapg", horizon_length=8, max_epochs=1),

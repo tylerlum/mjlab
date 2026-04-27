@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 N_ACT = 29
 N_OBS = 140
+N_STATE = 162
 OBJECT_BASE_SIZE = 0.04
 OBJECT_KEYPOINT_SIGNS = torch.tensor(
   [[1.0, 1.0, 1.0], [1.0, 1.0, -1.0], [-1.0, -1.0, 1.0], [-1.0, -1.0, -1.0]]
@@ -356,9 +357,9 @@ class SimToolRealJointPositionAction(ActionTerm):
     self._raw_actions[env_ids] = 0.0
     self._delayed_actions[env_ids] = 0.0
     self._action_queue[env_ids] = 0.0
-    default = self._entity.data.default_joint_pos[:, self._joint_ids]
-    self.prev_targets[env_ids] = default[env_ids]
-    self.targets[env_ids] = default[env_ids]
+    joint_pos = self._entity.data.joint_pos[:, self._joint_ids]
+    self.prev_targets[env_ids] = joint_pos[env_ids]
+    self.targets[env_ids] = joint_pos[env_ids]
 
 
 def cache_prev_targets(env: ManagerBasedRlEnv, env_ids: torch.Tensor | None) -> None:
@@ -770,6 +771,12 @@ def _body_pose(
   return pos, quat
 
 
+def _body_velocity(entity: Entity, body_names: tuple[str, ...]) -> torch.Tensor:
+  local_ids, _ = entity.find_bodies(body_names, preserve_order=True)
+  body_ids = entity.indexing.body_ids[local_ids]
+  return entity.data.body_link_vel_w[:, body_ids]
+
+
 def _simtoolreal_kinematics(
   env: ManagerBasedRlEnv,
   use_object_state_delay_noise: bool = True,
@@ -888,7 +895,7 @@ def _simtoolreal_kinematics(
     "fingertip_dist": fingertip_dist,
     "object_pos": object_pos,
     "object_lin_vel": object_lin_vel,
-    "object_ang_vel": object_ang_vel,
+  "object_ang_vel": object_ang_vel,
   }
 
 
@@ -922,6 +929,57 @@ def simtoolreal_observation(
       kin["keypoints_rel_palm"],
       kin["keypoints_rel_goal"],
       kin["object_scales"],
+    ],
+    dim=-1,
+  )
+
+
+def simtoolreal_state(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """Source-style asymmetric critic state for SimToolReal.
+
+  This mirrors the IsaacGym ``stateList`` default: clean actor observation fields
+  plus palm/object velocities, reward-progress bookkeeping, and success state.
+  """
+  kin = _simtoolreal_kinematics(
+    env,
+    use_object_state_delay_noise=False,
+    joint_velocity_obs_noise_std=0.0,
+  )
+  state = _state(env)
+  palm_vel = _body_velocity(_robot(env), ("iiwa14_link_7",))[:, 0]
+  reward_buf = getattr(env, "reward_buf", None)
+  if reward_buf is None:
+    reward_buf = torch.zeros(env.num_envs, device=env.device)
+  closest_keypoint = torch.where(
+    torch.isinf(state["closest_keypoint_max_dist_fixed_size"]),
+    kin["keypoint_max_dist_fixed"],
+    state["closest_keypoint_max_dist_fixed_size"],
+  )
+  closest_fingertip = torch.where(
+    torch.isinf(state["closest_fingertip_dist"]),
+    kin["fingertip_dist"],
+    state["closest_fingertip_dist"],
+  )
+  return torch.cat(
+    [
+      kin["joint_pos_unscaled"],
+      kin["joint_vel"],
+      kin["prev_targets"],
+      kin["palm_pos"],
+      kin["palm_quat"][:, [1, 2, 3, 0]],
+      palm_vel,
+      kin["object_quat"][:, [1, 2, 3, 0]],
+      torch.cat([kin["object_lin_vel"], kin["object_ang_vel"]], dim=-1),
+      kin["fingertip_rel_palm"],
+      kin["keypoints_rel_palm"],
+      kin["keypoints_rel_goal"],
+      kin["object_scales"],
+      closest_keypoint.unsqueeze(-1),
+      closest_fingertip,
+      state["lifted_object"].float().unsqueeze(-1),
+      torch.log(env.episode_length_buf.float().unsqueeze(-1) / 10.0 + 1.0),
+      torch.log(state["successes"].unsqueeze(-1) + 1.0),
+      0.01 * reward_buf.unsqueeze(-1),
     ],
     dim=-1,
   )

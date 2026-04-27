@@ -20,6 +20,7 @@ BackendName = Literal["rsl_rl", "simple_rl", "rl_games"]
 AlgorithmName = Literal["ppo", "sapg"]
 N_ACT = 29
 N_OBS = 140
+N_STATE = 162
 
 
 @dataclass(kw_only=True)
@@ -89,10 +90,10 @@ class MjlabSimpleRlWrapper:
     self.obs_group = obs_group
     self.state_group = "critic"
     self.num_envs = env.num_envs
-    self.num_states = N_OBS
+    self.num_states = N_STATE
     self.device = torch.device(env.device)
     self.observation_space = _gym_box((N_OBS,), -np.inf, np.inf)
-    self.state_space = _gym_box((N_OBS,), -np.inf, np.inf)
+    self.state_space = _gym_box((N_STATE,), -np.inf, np.inf)
     self.action_space = _gym_box((N_ACT,), -1.0, 1.0)
 
   def get_env_info(self) -> dict:
@@ -155,7 +156,7 @@ class MjlabRlGamesVecEnv:
     self.state_group = state_group
     self.num_envs = env.num_envs
     self.observation_space = _gym_box((N_OBS,), -np.inf, np.inf)
-    self.state_space = _gym_box((N_OBS,), -np.inf, np.inf)
+    self.state_space = _gym_box((N_STATE,), -np.inf, np.inf)
     self.action_space = _gym_box((N_ACT,), -1.0, 1.0)
 
   def _obs_dict(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -200,6 +201,22 @@ class MjlabRlGamesVecEnv:
     self.unwrapped.close()
 
 
+def _default_minibatch_size(cfg: SimToolRealAltRunnerCfg) -> int:
+  if cfg.algorithm == "sapg":
+    return 16_384
+  if cfg.use_lstm and cfg.use_asymmetric_critic:
+    return 98_304
+  return 32_768
+
+
+def _default_mini_epochs(cfg: SimToolRealAltRunnerCfg) -> int:
+  if cfg.algorithm == "sapg":
+    return 2
+  if cfg.use_lstm and cfg.use_asymmetric_critic:
+    return 2
+  return 4
+
+
 def make_simple_rl_configs(
   cfg: SimToolRealAltRunnerCfg,
   num_envs: int,
@@ -220,8 +237,8 @@ def make_simple_rl_configs(
       entropy_coef_scale=cfg.sapg_entropy_coef_scale,
     )
 
-  minibatch_size = cfg.minibatch_size or 16_384
-  mini_epochs = cfg.mini_epochs or 2
+  minibatch_size = cfg.minibatch_size or _default_minibatch_size(cfg)
+  mini_epochs = cfg.mini_epochs or _default_mini_epochs(cfg)
   lr_schedule = None if cfg.lr_schedule == "none" else cfg.lr_schedule
   network = NetworkConfig(
     mlp=MlpConfig(units=(1024, 1024, 512, 512)),
@@ -237,9 +254,7 @@ def make_simple_rl_configs(
   )
   asymmetric_critic = None
   if cfg.use_asymmetric_critic:
-    asymmetric_minibatch_size = cfg.minibatch_size or (
-      16_384 if cfg.algorithm == "sapg" else 98_304
-    )
+    asymmetric_minibatch_size = cfg.minibatch_size or _default_minibatch_size(cfg)
     asymmetric_critic = AsymmetricCriticConfig(
       name="asymmetric_critic",
       learning_rate=cfg.learning_rate,
@@ -296,10 +311,8 @@ def make_rl_games_config(
   num_envs: int,
   device: str,
 ) -> dict:
-  minibatch_size = cfg.minibatch_size or (
-    16_384 if cfg.algorithm == "sapg" else 32_768
-  )
-  mini_epochs = cfg.mini_epochs or (2 if cfg.algorithm == "sapg" else 4)
+  minibatch_size = cfg.minibatch_size or _default_minibatch_size(cfg)
+  mini_epochs = cfg.mini_epochs or _default_mini_epochs(cfg)
   expl_type = "none"
   fixed_sigma = "fixed"
   block_size = num_envs
@@ -346,9 +359,7 @@ def make_rl_games_config(
 
   central_value_config = None
   if cfg.use_asymmetric_critic:
-    central_value_minibatch_size = cfg.minibatch_size or (
-      16_384 if cfg.algorithm == "sapg" else 98_304
-    )
+    central_value_minibatch_size = cfg.minibatch_size or _default_minibatch_size(cfg)
     central_value_config = {
       "minibatch_size": central_value_minibatch_size,
       "mini_epochs": 2,

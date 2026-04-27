@@ -49,7 +49,14 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       {"simtoolreal": simtoolreal_obs},
       enable_corruption=not play,
     ),
-    "critic": ObservationGroupCfg({"simtoolreal": simtoolreal_obs}),
+    "critic": ObservationGroupCfg(
+      {
+        "simtoolreal": ObservationTermCfg(
+          func=mdp.simtoolreal_state,
+          clip=(-10.0, 10.0),
+        )
+      }
+    ),
   }
 
   object_geom_cfg = SceneEntityCfg(
@@ -156,7 +163,7 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "goal": get_goal_cfg(),
         "table": get_table_cfg(),
       },
-      num_envs=1 if play else 1024,
+      num_envs=1 if play else 8192,
       env_spacing=2.0,
       extent=2.0,
     ),
