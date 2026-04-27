@@ -12,7 +12,7 @@ import torch
 
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.tasks.simtoolreal.assets import JOINT_NAMES, ROBOT_URDF
-from mjlab.tasks.simtoolreal.mdp import N_ACT
+from mjlab.tasks.simtoolreal.mdp import N_ACT, OBJECT_BASE_SIZE, _state
 
 
 @dataclass(kw_only=True)
@@ -109,10 +109,12 @@ class SimToolRealViewerCaptureWrapper:
     )
 
     robot_urdf = Path(ROBOT_URDF).read_text(encoding="utf-8")
-    object_entity = self.env.scene["object"]
-    object_geom_id = object_entity.indexing.geom_ids[0]
-    object_half_size = self.env.sim.model.geom_size[0, object_geom_id, :3]
-    object_size = tuple((2.0 * object_half_size).detach().cpu().tolist())
+    object_size = tuple(
+      (OBJECT_BASE_SIZE * _state(self.env)["object_scales"][0])
+      .detach()
+      .cpu()
+      .tolist()
+    )
     robots = [
       make_embedded_robot(
         name="robot",

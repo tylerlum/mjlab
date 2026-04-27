@@ -35,8 +35,17 @@ FINGERTIP_BODIES = (
   "left_thumb_DP",
   "left_pinky_DP",
 )
-OBJECT_GEOM_CFG = SceneEntityCfg("object", geom_names=("object_geom",))
+OBJECT_GEOM_CFG = SceneEntityCfg(
+  "object", geom_names=("object_handle_geom", "object_head_geom")
+)
+OBJECT_HANDLE_GEOM_CFG = SceneEntityCfg("object", geom_names=("object_handle_geom",))
+OBJECT_HEAD_GEOM_CFG = SceneEntityCfg("object", geom_names=("object_head_geom",))
 OBJECT_BODY_CFG = SceneEntityCfg("object", body_names=("object",))
+GOAL_GEOM_CFG = SceneEntityCfg(
+  "goal", geom_names=("goal_handle_geom", "goal_head_geom")
+)
+GOAL_HANDLE_GEOM_CFG = SceneEntityCfg("goal", geom_names=("goal_handle_geom",))
+GOAL_HEAD_GEOM_CFG = SceneEntityCfg("goal", geom_names=("goal_head_geom",))
 
 HANDLE_HEAD_DISTRIBUTIONS = (
   ((0.15, 0.02, 0.015), (0.30, 0.04, 0.03), (0.02, 0.05, 0.02), (0.06, 0.12, 0.06)),
@@ -127,6 +136,12 @@ def _state(env: ManagerBasedRlEnv) -> dict[str, torch.Tensor]:
       "object_scales": torch.tensor(
         [5.0, 0.75, 0.75], device=env.device, dtype=torch.float32
       ).repeat(env.num_envs, 1),
+      "handle_lengths": torch.tensor(
+        [0.15, 0.025, 0.025], device=env.device, dtype=torch.float32
+      ).repeat(env.num_envs, 1),
+      "head_lengths": torch.tensor(
+        [0.05, 0.05, 0.03], device=env.device, dtype=torch.float32
+      ).repeat(env.num_envs, 1),
       "closest_keypoint_max_dist": torch.full(
         (env.num_envs,), float("inf"), device=env.device
       ),
@@ -138,7 +153,9 @@ def _state(env: ManagerBasedRlEnv) -> dict[str, torch.Tensor]:
       ),
       "furthest_hand_dist": torch.zeros(env.num_envs, device=env.device),
       "near_goal_steps": torch.zeros(env.num_envs, device=env.device),
+      "reset_goal_buf": torch.zeros(env.num_envs, device=env.device, dtype=torch.bool),
       "successes": torch.zeros(env.num_envs, device=env.device),
+      "prev_episode_successes": torch.zeros(env.num_envs, device=env.device),
       "lifted_object": torch.zeros(env.num_envs, device=env.device, dtype=torch.bool),
       "just_lifted_object": torch.zeros(
         env.num_envs, device=env.device, dtype=torch.bool
@@ -337,6 +354,8 @@ def reset_simtoolreal_state(env: ManagerBasedRlEnv, env_ids: torch.Tensor | None
   state["closest_fingertip_dist"][env_ids] = float("inf")
   state["furthest_hand_dist"][env_ids] = 0.0
   state["near_goal_steps"][env_ids] = 0.0
+  state["reset_goal_buf"][env_ids] = False
+  state["prev_episode_successes"][env_ids] = state["successes"][env_ids]
   state["successes"][env_ids] = 0.0
   state["lifted_object"][env_ids] = False
   state["just_lifted_object"][env_ids] = False
@@ -412,7 +431,50 @@ def reset_goal_uniform(
   goal.write_mocap_pose_to_sim(torch.cat([pos, quat], dim=-1), env_ids=env_ids)
 
 
+def sample_handle_head_lengths(
+  env: ManagerBasedRlEnv, n: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+  handle_lengths = torch.zeros((n, 3), device=env.device)
+  head_lengths = torch.zeros((n, 3), device=env.device)
+  choices = torch.randint(0, len(HANDLE_HEAD_DISTRIBUTIONS), (n,), device=env.device)
+  for i, (h_min, h_max, head_min, head_max) in enumerate(HANDLE_HEAD_DISTRIBUTIONS):
+    mask = choices == i
+    if not mask.any():
+      continue
+    count = int(mask.sum().item())
+    h_min_t = torch.tensor(h_min, device=env.device, dtype=torch.float32)
+    h_max_t = torch.tensor(h_max, device=env.device, dtype=torch.float32)
+    handle = torch.rand((count, len(h_min)), device=env.device) * (h_max_t - h_min_t) + h_min_t
+    if handle.shape[1] == 2:
+      handle = torch.stack([handle[:, 0], handle[:, 1], handle[:, 1]], dim=-1)
+    handle_lengths[mask] = handle
+    if head_min is None or head_max is None:
+      head_lengths[mask] = 0.0
+    else:
+      head_min_t = torch.tensor(head_min, device=env.device, dtype=torch.float32)
+      head_max_t = torch.tensor(head_max, device=env.device, dtype=torch.float32)
+      head_lengths[mask] = (
+        torch.rand((count, 3), device=env.device) * (head_max_t - head_min_t)
+        + head_min_t
+      )
+  return handle_lengths, head_lengths
+
+
 def sample_handle_head_equivalent_lengths(env: ManagerBasedRlEnv, n: int) -> torch.Tensor:
+  handle_lengths, head_lengths = sample_handle_head_lengths(env, n)
+  return torch.stack(
+    [
+      handle_lengths[:, 0] + head_lengths[:, 0],
+      torch.maximum(handle_lengths[:, 1], head_lengths[:, 1]),
+      torch.maximum(handle_lengths[:, 2], head_lengths[:, 2]),
+    ],
+    dim=-1,
+  )
+
+
+def _legacy_sample_handle_head_equivalent_lengths(
+  env: ManagerBasedRlEnv, n: int
+) -> torch.Tensor:
   lengths = torch.zeros((n, 3), device=env.device)
   choices = torch.randint(0, len(HANDLE_HEAD_DISTRIBUTIONS), (n,), device=env.device)
   for i, (h_min, h_max, head_min, head_max) in enumerate(HANDLE_HEAD_DISTRIBUTIONS):
@@ -470,15 +532,18 @@ def randomize_simple_cuboid_size(
   )
   obj = _object(env)
   geom_ids = obj.indexing.geom_ids[asset_cfg.geom_ids]
-  lengths = 2.0 * env.sim.model.geom_size[env_ids[:, None], geom_ids, :3].squeeze(1)
+  lengths = 2.0 * env.sim.model.geom_size[env_ids[:, None], geom_ids, :3]
+  lengths = lengths.max(dim=1).values
   state["object_scales"][env_ids] = lengths / OBJECT_BASE_SIZE
 
 
 @requires_model_fields(
   "geom_size",
+  "geom_pos",
   "geom_rbound",
   "geom_aabb",
   "body_mass",
+  "body_ipos",
   "body_inertia",
   recompute=RecomputeLevel.set_const,
 )
@@ -487,35 +552,100 @@ def randomize_handle_head_equivalent_size(
   env_ids: torch.Tensor | None,
   density: float = 400.0,
   asset_cfg: SceneEntityCfg = OBJECT_GEOM_CFG,
+  goal_asset_cfg: SceneEntityCfg = GOAL_GEOM_CFG,
   body_cfg: SceneEntityCfg = OBJECT_BODY_CFG,
 ) -> None:
   if env_ids is None:
     env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
   else:
     env_ids = env_ids.to(env.device, dtype=torch.int)
-  lengths = sample_handle_head_equivalent_lengths(env, len(env_ids))
-  obj = _object(env)
-  geom_ids = obj.indexing.geom_ids[asset_cfg.geom_ids]
-  env_grid = env_ids[:, None]
-  env.sim.model.geom_size[env_grid, geom_ids, :3] = 0.5 * lengths[:, None, :]
-  from mjlab.envs.mdp.dr.geom import _recompute_geom_bounds
-
-  _recompute_geom_bounds(env, env_ids=env_ids, asset_cfg=asset_cfg)
-  body_ids = obj.indexing.body_ids[body_cfg.body_ids]
-  mass = density * torch.prod(lengths, dim=-1)
-  inertia = torch.stack(
+  handle_lengths, head_lengths = sample_handle_head_lengths(env, len(env_ids))
+  lengths = torch.stack(
     [
-      mass * (lengths[:, 1] ** 2 + lengths[:, 2] ** 2) / 12.0,
-      mass * (lengths[:, 0] ** 2 + lengths[:, 2] ** 2) / 12.0,
-      mass * (lengths[:, 0] ** 2 + lengths[:, 1] ** 2) / 12.0,
+      handle_lengths[:, 0] + head_lengths[:, 0],
+      torch.maximum(handle_lengths[:, 1], head_lengths[:, 1]),
+      torch.maximum(handle_lengths[:, 2], head_lengths[:, 2]),
     ],
     dim=-1,
   )
+  min_geom_size = torch.full_like(head_lengths, 1.0e-4)
+  head_geom_lengths = torch.where(head_lengths > 0.0, head_lengths, min_geom_size)
+  handle_centers = torch.zeros_like(handle_lengths)
+  head_centers = torch.zeros_like(head_lengths)
+  handle_centers[:, 0] = -0.5 * lengths[:, 0] + 0.5 * handle_lengths[:, 0]
+  head_centers[:, 0] = 0.5 * lengths[:, 0] - 0.5 * head_geom_lengths[:, 0]
+
+  obj = _object(env)
+  goal = _goal(env)
+  geom_ids = obj.indexing.geom_ids[asset_cfg.geom_ids]
+  goal_geom_ids = goal.indexing.geom_ids[goal_asset_cfg.geom_ids]
+  env_grid = env_ids[:, None]
+  geom_lengths = torch.stack([handle_lengths, head_geom_lengths], dim=1)
+  geom_centers = torch.stack([handle_centers, head_centers], dim=1)
+  env.sim.model.geom_size[env_grid, geom_ids, :3] = 0.5 * geom_lengths
+  env.sim.model.geom_pos[env_grid, geom_ids, :3] = geom_centers
+  env.sim.model.geom_size[env_grid, goal_geom_ids, :3] = 0.5 * geom_lengths
+  env.sim.model.geom_pos[env_grid, goal_geom_ids, :3] = geom_centers
+  from mjlab.envs.mdp.dr.geom import _recompute_geom_bounds
+
+  _recompute_geom_bounds(env, env_ids=env_ids, asset_cfg=asset_cfg)
+  _recompute_geom_bounds(env, env_ids=env_ids, asset_cfg=goal_asset_cfg)
+
+  body_ids = obj.indexing.body_ids[body_cfg.body_ids]
+  handle_mass = density * torch.prod(handle_lengths, dim=-1)
+  head_mass = density * torch.prod(head_lengths, dim=-1)
+  mass = (handle_mass + head_mass).clamp_min(1.0e-6)
+  com_x = (handle_mass * handle_centers[:, 0] + head_mass * head_centers[:, 0]) / mass
+  handle_dx = handle_centers[:, 0] - com_x
+  head_dx = head_centers[:, 0] - com_x
+  handle_inertia = torch.stack(
+    [
+      handle_mass * (handle_lengths[:, 1] ** 2 + handle_lengths[:, 2] ** 2) / 12.0,
+      handle_mass * (handle_lengths[:, 0] ** 2 + handle_lengths[:, 2] ** 2) / 12.0
+      + handle_mass * handle_dx**2,
+      handle_mass * (handle_lengths[:, 0] ** 2 + handle_lengths[:, 1] ** 2) / 12.0
+      + handle_mass * handle_dx**2,
+    ],
+    dim=-1,
+  )
+  head_inertia = torch.stack(
+    [
+      head_mass * (head_lengths[:, 1] ** 2 + head_lengths[:, 2] ** 2) / 12.0,
+      head_mass * (head_lengths[:, 0] ** 2 + head_lengths[:, 2] ** 2) / 12.0
+      + head_mass * head_dx**2,
+      head_mass * (head_lengths[:, 0] ** 2 + head_lengths[:, 1] ** 2) / 12.0
+      + head_mass * head_dx**2,
+    ],
+    dim=-1,
+  )
+  inertia = (handle_inertia + head_inertia).clamp_min(1.0e-8)
   env.sim.model.body_mass[env_ids[:, None], body_ids] = mass[:, None]
+  env.sim.model.body_ipos[env_ids[:, None], body_ids, :] = 0.0
+  env.sim.model.body_ipos[env_ids[:, None], body_ids, 0] = com_x[:, None]
   env.sim.model.body_inertia[env_ids[:, None], body_ids] = inertia[:, None, :]
   state = _state(env)
+  state["handle_lengths"][env_ids] = handle_lengths
+  state["head_lengths"][env_ids] = head_lengths
   state["object_scales"][env_ids] = lengths / OBJECT_BASE_SIZE
   state["object_masses"][env_ids] = mass
+
+
+def randomize_handle_head_size(
+  env: ManagerBasedRlEnv,
+  env_ids: torch.Tensor | None,
+  density: float = 400.0,
+  asset_cfg: SceneEntityCfg = OBJECT_GEOM_CFG,
+  goal_asset_cfg: SceneEntityCfg = GOAL_GEOM_CFG,
+  body_cfg: SceneEntityCfg = OBJECT_BODY_CFG,
+) -> None:
+  randomize_handle_head_equivalent_size(
+    env,
+    env_ids,
+    density=density,
+    asset_cfg=asset_cfg,
+    goal_asset_cfg=goal_asset_cfg,
+    body_cfg=body_cfg,
+  )
 
 
 def _body_pose(
@@ -759,8 +889,33 @@ def success_bonus(
   state = _state(env)
   near = kin["keypoint_max_dist_fixed"] <= tolerance * keypoint_scale
   state["near_goal_steps"] += near.float()
-  state["successes"] += (state["near_goal_steps"] >= steps).float()
+  is_success = state["near_goal_steps"] >= steps
+  state["successes"] += is_success.float()
+  state["reset_goal_buf"] |= is_success
   return near.float() * (reach_goal_bonus / steps)
+
+
+def reset_successful_goals(
+  env: ManagerBasedRlEnv,
+  env_ids: torch.Tensor | None,
+  max_consecutive_successes: int = 50,
+) -> None:
+  del env_ids
+  state = _state(env)
+  should_reset_goal = state["reset_goal_buf"] & (
+    state["successes"] < max_consecutive_successes
+  )
+  reset_goal_env_ids = should_reset_goal.nonzero(as_tuple=False).squeeze(-1)
+  state["reset_goal_buf"] &= state["successes"] >= max_consecutive_successes
+  if len(reset_goal_env_ids) == 0:
+    return
+  reset_goal_uniform(env, reset_goal_env_ids)
+  state["reset_goal_buf"][reset_goal_env_ids] = False
+  state["near_goal_steps"][reset_goal_env_ids] = 0.0
+  state["closest_keypoint_max_dist"][reset_goal_env_ids] = float("inf")
+  state["closest_keypoint_max_dist_fixed_size"][reset_goal_env_ids] = float("inf")
+  env.scene.write_data_to_sim()
+  env.sim.forward()
 
 
 def kuka_action_penalty(
@@ -803,6 +958,13 @@ def goal_reached(
   del tolerance
   state = _state(env)
   return state["near_goal_steps"] >= steps
+
+
+def max_consecutive_successes_reached(
+  env: ManagerBasedRlEnv,
+  max_consecutive_successes: int = 50,
+) -> torch.Tensor:
+  return _state(env)["successes"] >= max_consecutive_successes
 
 
 def apply_random_object_perturbations(

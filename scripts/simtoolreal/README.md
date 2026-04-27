@@ -106,15 +106,20 @@ What is currently ported:
   relative control and hand absolute target smoothing.
 - 140-dimensional observation tensor matching the browser-policy shape.
 - Vectorized object and goal resets with per-env origin offsets.
-- Source handle/head object-size distributions collapsed to one equivalent box
-  per world through MJLab `dr.geom_size`, which also updates `geom_rbound` and
-  `geom_aabb` for Warp. This keeps the MDP distribution closer while MJLab lacks
-  same-scene different-primitive objects.
+- Source handle/head object-size distributions using separate per-world handle
+  and head box geoms through MJLab `geom_size`/`geom_pos` model fields. Bounds,
+  body mass, body COM, and inertia are updated after each size sample. Source
+  cylindrical handles are approximated as cuboidal handles with matching length
+  and diameter.
 - 60 Hz policy/control cadence (`timestep=1/120`, `decimation=2`) with 10 second
   training episodes.
 - Stateful lifting, lift-bonus, fixed-size keypoint-progress, pre-lift
   fingertip-progress, success-window, action penalty, velocity, fall, distance,
   and timeout terms.
+- IsaacGym-style goal success handling: success increments a per-episode counter,
+  resamples the goal instead of terminating the episode, resets the success
+  window/keypoint-progress state, and only terminates after
+  `maxConsecutiveSuccesses=50`.
 - Training-time sim-to-real randomization for observation/action delay,
   object-state delay/noise, joint-velocity noise, object reset pose/rotation,
   and source-scale random force/torque perturbations while lifted.
@@ -141,12 +146,9 @@ What is currently ported:
   actuators. The browser harness uses the website MuJoCo XML. Joint names and
   kinematic body names now come from the IsaacGym/URDF path, but actuator gains,
   contact settings, inertias, and geom simplifications still need parity audits.
-- Object geometry is still one box per world. The source object sampler chooses
-  cylinder/cuboid handles plus cuboid/no heads; MJLab currently approximates those
-  as an equivalent bounding box, so contact geometry is not yet exact.
-- Goal success currently terminates the episode. IsaacGym SimToolReal samples a
-  new goal after success and can continue within the same episode; this needs a
-  dedicated manager term if we want exact goal-reset behavior.
+- Cylindrical source handles are still approximated as cuboidal handles. Cuboidal
+  handle/head objects now have separate contact geoms, but true per-world
+  primitive-type switching or mesh composition is still not implemented.
 - The RSL-RL config is only a baseline runner path. The vendored `rl_games` and
   `simple_rl` backends are the reproduction-oriented paths for the original
   SAPG-style training setup.
@@ -169,8 +171,8 @@ What is currently ported:
 2. Add saved-state parity tests between the browser harness, source MuJoCo/URDF
    env, and manager-based MJLab env for keypoints, palm/fingertip positions, and
    action target filtering.
-3. Replace the equivalent-box object approximation with true per-world
-   cylinder/cuboid handle/head objects once MJLab supports different primitive or
-   mesh composition per world.
+3. Replace cuboid-approximated cylindrical handles with true per-world primitive
+   switching or a cylinder+box superset once MJLab has a clean API for switching
+   contact participation per world.
 4. Run longer `rl_games` SAPG and `simple_rl` SAPG jobs from the same MJLab task
    and compare learning curves against the IsaacGym baseline.

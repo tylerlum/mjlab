@@ -57,7 +57,10 @@ def test_simtoolreal_training_cfg_matches_source_cadence_and_randomization() -> 
   assert cfg.actions["joint_pos"].use_action_delay
   assert cfg.actions["joint_pos"].action_delay_max == 3
   assert cfg.events["randomize_object_size"].func is mdp.randomize_handle_head_equivalent_size
+  assert cfg.events["reset_successful_goals"].func is mdp.reset_successful_goals
   assert cfg.events["random_object_perturbations"].func is mdp.apply_random_object_perturbations
+  assert "goal_reached" not in cfg.terminations
+  assert cfg.terminations["max_successes"].func is mdp.max_consecutive_successes_reached
   assert "fingertip_delta" in cfg.rewards
 
 
@@ -70,3 +73,49 @@ def test_simtoolreal_play_cfg_disables_training_noise() -> None:
   assert not obs_term.params["use_object_state_delay_noise"]
   assert obs_term.params["joint_velocity_obs_noise_std"] == 0.0
   assert not cfg.actions["joint_pos"].use_action_delay
+
+
+def test_simtoolreal_object_uses_separate_handle_and_head_geoms() -> None:
+  device = "cuda:0" if torch.cuda.is_available() else "cpu"
+  cfg = load_env_cfg(TASK_ID, play=True)
+  cfg.scene.num_envs = 2
+
+  env = ManagerBasedRlEnv(cfg=cfg, device=device)
+  try:
+    env.reset()
+    obj = env.scene["object"]
+    goal = env.scene["goal"]
+    _, object_geom_names = obj.find_geoms(
+      ("object_handle_geom", "object_head_geom"), preserve_order=True
+    )
+    _, goal_geom_names = goal.find_geoms(
+      ("goal_handle_geom", "goal_head_geom"), preserve_order=True
+    )
+    assert tuple(object_geom_names) == ("object_handle_geom", "object_head_geom")
+    assert tuple(goal_geom_names) == ("goal_handle_geom", "goal_head_geom")
+    state = mdp._state(env)
+    assert torch.all(state["handle_lengths"] > 0.0)
+    assert torch.all(state["object_scales"][:, 0] > 0.0)
+  finally:
+    env.close()
+
+
+def test_simtoolreal_success_resamples_goal_without_episode_termination() -> None:
+  device = "cuda:0" if torch.cuda.is_available() else "cpu"
+  cfg = load_env_cfg(TASK_ID, play=True)
+  cfg.scene.num_envs = 1
+
+  env = ManagerBasedRlEnv(cfg=cfg, device=device)
+  try:
+    env.reset()
+    state = mdp._state(env)
+    state["reset_goal_buf"][0] = True
+    state["near_goal_steps"][0] = 10.0
+    old_goal = env.scene["goal"].data.root_link_pos_w[0].clone()
+    mdp.reset_successful_goals(env, None)
+    new_goal = env.scene["goal"].data.root_link_pos_w[0]
+    assert not state["reset_goal_buf"][0]
+    assert state["near_goal_steps"][0] == 0.0
+    assert not torch.allclose(old_goal, new_goal)
+  finally:
+    env.close()

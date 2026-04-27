@@ -130,17 +130,28 @@ def get_iiwa_sharpa_cfg() -> EntityCfg:
 
 
 def get_object_spec(
-  half_size: tuple[float, float, float] = (0.10, 0.015, 0.015),
+  handle_half_size: tuple[float, float, float] = (0.075, 0.0125, 0.0125),
+  head_half_size: tuple[float, float, float] = (0.025, 0.025, 0.015),
   mass: float = 0.08,
 ) -> mujoco.MjSpec:
   spec = mujoco.MjSpec()
   body = spec.worldbody.add_body(name="object")
   body.add_freejoint(name="object_free_joint")
   body.add_geom(
-    name="object_geom",
+    name="object_handle_geom",
     type=mujoco.mjtGeom.mjGEOM_BOX,
-    size=half_size,
-    mass=mass,
+    pos=(-0.025, 0.0, 0.0),
+    size=handle_half_size,
+    mass=0.75 * mass,
+    rgba=(0.45, 0.45, 0.45, 1.0),
+    condim=6,
+  )
+  body.add_geom(
+    name="object_head_geom",
+    type=mujoco.mjtGeom.mjGEOM_BOX,
+    pos=(0.075, 0.0, 0.0),
+    size=head_half_size,
+    mass=0.25 * mass,
     rgba=(0.45, 0.45, 0.45, 1.0),
     condim=6,
   )
@@ -159,14 +170,25 @@ def get_object_cfg() -> EntityCfg:
 
 
 def get_goal_spec(
-  half_size: tuple[float, float, float] = (0.10, 0.015, 0.015),
+  handle_half_size: tuple[float, float, float] = (0.075, 0.0125, 0.0125),
+  head_half_size: tuple[float, float, float] = (0.025, 0.025, 0.015),
 ) -> mujoco.MjSpec:
   spec = mujoco.MjSpec()
   body = spec.worldbody.add_body(name="goal_object", mocap=True)
   body.add_geom(
-    name="goal_object_geom",
+    name="goal_handle_geom",
     type=mujoco.mjtGeom.mjGEOM_BOX,
-    size=half_size,
+    pos=(-0.025, 0.0, 0.0),
+    size=handle_half_size,
+    rgba=(0.1, 0.8, 0.2, 0.35),
+    contype=0,
+    conaffinity=0,
+  )
+  body.add_geom(
+    name="goal_head_geom",
+    type=mujoco.mjtGeom.mjGEOM_BOX,
+    pos=(0.075, 0.0, 0.0),
+    size=head_half_size,
     rgba=(0.1, 0.8, 0.2, 0.35),
     contype=0,
     conaffinity=0,

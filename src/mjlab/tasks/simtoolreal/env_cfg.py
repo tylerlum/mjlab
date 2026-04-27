@@ -26,9 +26,9 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   """Create the SimToolReal KUKA+Sharpa training environment.
 
   This is the manager-based MJLab/Warp port of the IsaacGym MDP, using the source
-  URDF assets directly instead of the browser-demo XML. The current object sampler
-  uses source handle/head size distributions collapsed to one equivalent box until
-  per-world primitive/mesh swaps are ready.
+  URDF assets directly instead of the browser-demo XML. The object sampler uses
+  separate per-world box geoms for the handle and head; cylinder handles from the
+  source distribution are approximated by cuboidal handles.
   """
   simtoolreal_obs = ObservationTermCfg(
     func=mdp.simtoolreal_observation,
@@ -52,7 +52,12 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     "critic": ObservationGroupCfg({"simtoolreal": simtoolreal_obs}),
   }
 
-  object_geom_cfg = SceneEntityCfg("object", geom_names=("object_geom",))
+  object_geom_cfg = SceneEntityCfg(
+    "object", geom_names=("object_handle_geom", "object_head_geom")
+  )
+  goal_geom_cfg = SceneEntityCfg(
+    "goal", geom_names=("goal_handle_geom", "goal_head_geom")
+  )
   events = {
     "reset_scene_to_default": EventTermCfg(
       func=reset_scene_to_default,
@@ -61,7 +66,7 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     "randomize_object_size": EventTermCfg(
       func=mdp.randomize_handle_head_equivalent_size,
       mode="reset",
-      params={"asset_cfg": object_geom_cfg},
+      params={"asset_cfg": object_geom_cfg, "goal_asset_cfg": goal_geom_cfg},
     ),
     "reset_object": EventTermCfg(
       func=mdp.reset_object_uniform,
@@ -103,6 +108,10 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "ang_vel_impulse_scale": 0.0,
       },
     ),
+    "reset_successful_goals": EventTermCfg(
+      func=mdp.reset_successful_goals,
+      mode="step",
+    ),
   }
 
   rewards = {
@@ -120,7 +129,10 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     "time_out": TerminationTermCfg(func=time_out, time_out=True),
     "object_fell": TerminationTermCfg(func=mdp.object_fell),
     "hand_far_from_object": TerminationTermCfg(func=mdp.hand_far_from_object),
-    "goal_reached": TerminationTermCfg(func=mdp.goal_reached),
+    "max_successes": TerminationTermCfg(
+      func=mdp.max_consecutive_successes_reached,
+      params={"max_consecutive_successes": 50},
+    ),
   }
 
   return ManagerBasedRlEnvCfg(
