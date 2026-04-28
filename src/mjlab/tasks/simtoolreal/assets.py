@@ -290,7 +290,10 @@ def get_iiwa_sharpa_cfg() -> EntityCfg:
   )
   return EntityCfg(
     spec_fn=get_iiwa_sharpa_spec,
-    init_state=EntityCfg.InitialStateCfg(joint_pos=DEFAULT_JOINT_POS),
+    init_state=EntityCfg.InitialStateCfg(
+      pos=(0.0, 0.8, 0.0),
+      joint_pos=DEFAULT_JOINT_POS,
+    ),
     articulation=EntityArticulationInfoCfg(actuators=actuators),
     sort_actuators=True,
   )
@@ -395,7 +398,7 @@ def get_table_cfg() -> EntityCfg:
   return EntityCfg(
     spec_fn=get_table_spec,
     init_state=EntityCfg.InitialStateCfg(
-      pos=(0.0, 0.05, 0.38),
+      pos=(0.0, 0.0, 0.38),
       rot=(1.0, 0.0, 0.0, 0.0),
       joint_pos={},
     ),
