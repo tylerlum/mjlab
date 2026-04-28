@@ -54,14 +54,32 @@ JOINT_NAMES = (
 
 DEFAULT_JOINT_POS = {
   "iiwa14_joint_1": -1.571,
-  "iiwa14_joint_2": 1.39647,
+  "iiwa14_joint_2": 1.571,
   "iiwa14_joint_3": 0.0,
-  "iiwa14_joint_4": 1.55053,
+  "iiwa14_joint_4": 1.376,
   "iiwa14_joint_5": 0.0,
   "iiwa14_joint_6": 1.485,
   "iiwa14_joint_7": 1.308,
   ".*": 0.0,
 }
+
+DEFAULT_ASSET_FRICTION = 0.5
+FINGERTIP_FRICTION = 1.5
+DEFAULT_GEOM_FRICTION = (DEFAULT_ASSET_FRICTION, 0.005, 0.0001)
+FINGERTIP_GEOM_FRICTION = (FINGERTIP_FRICTION, 0.005, 0.0001)
+FINGERTIP_LINK_NAMES = (
+  "left_index_DP",
+  "left_middle_DP",
+  "left_ring_DP",
+  "left_thumb_DP",
+  "left_pinky_DP",
+)
+FINGERTIP_MESH_NAMES = (
+  "left_DP",
+  "left_thumb_DP",
+  "elastomer",
+  "thumb_elastomer",
+)
 
 KUKA_STIFFNESSES = (600.0, 600.0, 500.0, 400.0, 200.0, 200.0, 200.0)
 KUKA_DAMPINGS = (
@@ -209,6 +227,18 @@ def _resolve_robot_mesh_paths(spec: mujoco.MjSpec) -> None:
       mesh.file = str(path)
 
 
+def _apply_robot_friction_overrides(spec: mujoco.MjSpec) -> None:
+  """Mirror SimToolReal's default/fingertip asset friction split on URDF geoms."""
+  fingertip_meshes = set(FINGERTIP_LINK_NAMES) | set(FINGERTIP_MESH_NAMES)
+  for geom in spec.geoms:
+    friction = (
+      FINGERTIP_GEOM_FRICTION
+      if geom.meshname in fingertip_meshes
+      else DEFAULT_GEOM_FRICTION
+    )
+    geom.friction = friction
+
+
 def _prepare_robot_mesh_cache() -> Path:
   """Make MuJoCo's basename-only URDF mesh import resolvable at compile time."""
   ROBOT_MESH_CACHE.mkdir(parents=True, exist_ok=True)
@@ -255,6 +285,7 @@ def get_iiwa_sharpa_spec() -> mujoco.MjSpec:
   spec = mujoco.MjSpec.from_file(str(ROBOT_URDF))
   spec.modelfiledir = str(_prepare_robot_mesh_cache())
   _resolve_robot_mesh_paths(spec)
+  _apply_robot_friction_overrides(spec)
   return spec
 
 
@@ -314,6 +345,7 @@ def get_object_spec(
     size=handle_half_size,
     mass=0.75 * mass,
     rgba=(0.45, 0.45, 0.45, 1.0),
+    friction=DEFAULT_GEOM_FRICTION,
     condim=6,
   )
   body.add_geom(
@@ -323,6 +355,7 @@ def get_object_spec(
     size=head_half_size,
     mass=0.25 * mass,
     rgba=(0.45, 0.45, 0.45, 1.0),
+    friction=DEFAULT_GEOM_FRICTION,
     condim=6,
   )
   return spec
@@ -332,7 +365,7 @@ def get_object_cfg() -> EntityCfg:
   return EntityCfg(
     spec_fn=get_object_spec,
     init_state=EntityCfg.InitialStateCfg(
-      pos=(0.0, 0.05, 0.545),
+      pos=(0.0, 0.0, 0.63),
       rot=(1.0, 0.0, 0.0, 0.0),
       joint_pos={},
     ),
@@ -370,7 +403,7 @@ def get_goal_cfg() -> EntityCfg:
   return EntityCfg(
     spec_fn=get_goal_spec,
     init_state=EntityCfg.InitialStateCfg(
-      pos=(0.0, 0.05, 0.78),
+      pos=(0.0, 0.0, 0.78),
       rot=(1.0, 0.0, 0.0, 0.0),
       joint_pos={},
     ),
@@ -388,7 +421,7 @@ def get_table_spec(
     size=half_size,
     mass=500.0,
     rgba=(0.82, 0.56, 0.35, 1.0),
-    friction=(1.0, 0.005, 0.0001),
+    friction=DEFAULT_GEOM_FRICTION,
     condim=6,
   )
   return spec

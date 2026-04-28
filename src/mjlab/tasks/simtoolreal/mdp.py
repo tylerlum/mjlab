@@ -179,7 +179,7 @@ def _state(env: ManagerBasedRlEnv) -> dict[str, torch.Tensor]:
       "just_lifted_object": torch.zeros(
         env.num_envs, device=env.device, dtype=torch.bool
       ),
-      "initial_object_z": torch.full((env.num_envs,), 0.545, device=env.device),
+      "initial_object_z": torch.full((env.num_envs,), 0.63, device=env.device),
       "object_masses": torch.full((env.num_envs,), 0.08, device=env.device),
       "table_reset_z": torch.full((env.num_envs,), 0.38, device=env.device),
       "object_scale_noise_multiplier": torch.ones(env.num_envs, 3, device=env.device),
@@ -378,7 +378,6 @@ def reset_simtoolreal_state(
   state = _state(env)
   object_entity = _object(env)
   object_pose = object_entity.data.root_link_pose_w
-  state["initial_object_z"][env_ids] = object_pose[env_ids, 2]
   state["closest_keypoint_max_dist"][env_ids] = float("inf")
   state["closest_keypoint_max_dist_fixed_size"][env_ids] = float("inf")
   state["closest_fingertip_dist"][env_ids] = float("inf")
@@ -415,8 +414,8 @@ def reset_simtoolreal_state(
 def reset_object_uniform(
   env: ManagerBasedRlEnv,
   env_ids: torch.Tensor | None,
-  x_range: tuple[float, float] = (-0.04, 0.04),
-  y_range: tuple[float, float] = (0.02, 0.08),
+  x_range: tuple[float, float] = (0.0, 0.0),
+  y_range: tuple[float, float] = (0.0, 0.0),
   z: float | None = None,
   table_reset_z: float = 0.38,
   table_reset_z_range: float = 0.01,
@@ -463,6 +462,7 @@ def reset_object_uniform(
   obj.write_root_link_velocity_to_sim(
     torch.zeros((len(env_ids), 6), device=env.device), env_ids=env_ids
   )
+  state["initial_object_z"][env_ids] = pos[:, 2] - env.scene.env_origins[env_ids, 2]
   noise_min, noise_max = object_scale_noise_multiplier_range
   state["object_scale_noise_multiplier"][env_ids] = torch.empty(
     (len(env_ids), 3), device=env.device
@@ -544,14 +544,6 @@ def reset_goal_uniform(
     pitch = torch.empty(len(env_ids), device=env.device).uniform_(-math.pi, math.pi)
     yaw = torch.empty(len(env_ids), device=env.device).uniform_(-math.pi, math.pi)
     quat = quat_from_euler_xyz(roll, pitch, yaw)
-  min_z = (
-    _object(env).data.root_link_pos_w[env_ids, 2]
-    - env.scene.env_origins[env_ids, 2]
-    - 0.05
-    + 0.15
-  )
-  if is_first_goal or goal_sampling_type not in {"delta", "coin_flip"}:
-    pos[:, 2] = torch.maximum(pos[:, 2], min_z)
   pos += env.scene.env_origins[env_ids]
   goal.write_mocap_pose_to_sim(torch.cat([pos, quat], dim=-1), env_ids=env_ids)
 
@@ -999,9 +991,7 @@ def simtoolreal_state(env: ManagerBasedRlEnv) -> torch.Tensor:
 def keypoint_delta_reward(env: ManagerBasedRlEnv) -> torch.Tensor:
   kin = _simtoolreal_kinematics(env, use_object_state_delay_noise=False)
   state = _state(env)
-  z_lift = 0.05 + kin["object_pos"][:, 2] - state["initial_object_z"]
-  lifted = state["lifted_object"] | (z_lift > 0.15)
-  state["lifted_object"][:] = lifted
+  lifted = state["lifted_object"]
   closest = state["closest_keypoint_max_dist"]
   closest_fixed = state["closest_keypoint_max_dist_fixed_size"]
   first_sample = torch.isinf(closest)

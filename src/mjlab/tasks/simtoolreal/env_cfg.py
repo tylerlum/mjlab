@@ -80,7 +80,7 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       mode="reset",
       params={
         "x_range": (0.0, 0.0),
-        "y_range": (0.05, 0.05),
+        "y_range": (0.0, 0.0),
         "table_reset_z": 0.38,
         "table_reset_z_range": 0.0 if play else 0.01,
         "table_object_z_offset": 0.25,
@@ -134,9 +134,9 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   }
 
   rewards = {
-    "fingertip_delta": RewardTermCfg(func=mdp.fingertip_delta_reward, weight=50.0),
     "lift": RewardTermCfg(func=mdp.lifting_reward, weight=20.0),
     "lift_bonus": RewardTermCfg(func=mdp.lifting_bonus_reward, weight=1.0),
+    "fingertip_delta": RewardTermCfg(func=mdp.fingertip_delta_reward, weight=50.0),
     "keypoint_delta": RewardTermCfg(func=mdp.keypoint_delta_reward, weight=200.0),
     "success": RewardTermCfg(func=mdp.success_bonus, weight=1.0),
     "kuka_action_penalty": RewardTermCfg(func=mdp.kuka_action_penalty, weight=1.0),
@@ -164,7 +164,7 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "table": get_table_cfg(),
       },
       num_envs=1 if play else 8192,
-      env_spacing=2.0,
+      env_spacing=1.2,
       extent=2.0,
     ),
     observations=observations,

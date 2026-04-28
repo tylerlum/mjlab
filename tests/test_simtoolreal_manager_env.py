@@ -38,6 +38,11 @@ def test_simtoolreal_manager_env_reset_step_smoke() -> None:
     assert env.action_manager.total_action_dim == N_ACT
     action_term = env.action_manager.get_term("joint_pos")
     robot = env.scene["robot"]
+    state = mdp._state(env)
+    torch.testing.assert_close(
+      state["initial_object_z"],
+      env.scene["object"].data.root_link_pos_w[:, 2],
+    )
     torch.testing.assert_close(
       action_term.prev_targets,
       robot.data.joint_pos[:, action_term._joint_ids],
@@ -61,6 +66,7 @@ def test_simtoolreal_training_cfg_matches_source_cadence_and_randomization() -> 
   cfg = load_env_cfg(TASK_ID, play=False)
 
   assert cfg.scene.num_envs == 8192
+  assert cfg.scene.env_spacing == pytest.approx(1.2)
   assert cfg.sim.mujoco.timestep == pytest.approx(1.0 / 120.0)
   assert cfg.decimation == 2
   assert cfg.episode_length_s == pytest.approx(10.0)
@@ -70,6 +76,7 @@ def test_simtoolreal_training_cfg_matches_source_cadence_and_randomization() -> 
   assert cfg.events["randomize_object_size"].func is mdp.randomize_handle_head_equivalent_size
   assert cfg.events["reset_object"].params["table_reset_z"] == pytest.approx(0.38)
   assert cfg.events["reset_object"].params["table_reset_z_range"] == pytest.approx(0.01)
+  assert cfg.events["reset_object"].params["y_range"] == pytest.approx((0.0, 0.0))
   assert cfg.events["reset_robot_joints"].func is mdp.reset_robot_joints_simtoolreal
   assert cfg.events["reset_successful_goals"].func is mdp.reset_successful_goals
   assert cfg.events["random_object_perturbations"].func is mdp.apply_random_object_perturbations

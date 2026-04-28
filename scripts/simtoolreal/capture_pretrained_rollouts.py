@@ -187,6 +187,7 @@ def _run_one(
   try:
     obs, _ = env.reset(seed=args.seed + rollout_idx)
     policy.reset()
+    obs, _, _, _, _ = env.step(torch.zeros((1, N_ACT), device=env.device))
     print(
       f"rollout={rollout_idx} seed={args.seed + rollout_idx} "
       f"{_object_summary(env.unwrapped)}"
