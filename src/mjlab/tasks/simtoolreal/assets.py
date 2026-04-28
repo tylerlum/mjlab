@@ -63,6 +63,139 @@ DEFAULT_JOINT_POS = {
   ".*": 0.0,
 }
 
+KUKA_STIFFNESSES = (600.0, 600.0, 500.0, 400.0, 200.0, 200.0, 200.0)
+KUKA_DAMPINGS = (
+  27.027026473513512,
+  27.027026473513512,
+  24.672186769721083,
+  22.067474708266914,
+  9.752538131173853,
+  9.147747263670984,
+  9.147747263670984,
+)
+KUKA_EFFORTS = (300.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0)
+
+HAND_STIFFNESSES = (
+  6.95,
+  13.2,
+  4.76,
+  6.62,
+  0.9,
+  4.76,
+  6.62,
+  0.9,
+  0.9,
+  4.76,
+  6.62,
+  0.9,
+  0.9,
+  4.76,
+  6.62,
+  0.9,
+  0.9,
+  1.38,
+  4.76,
+  6.62,
+  0.9,
+  0.9,
+)
+HAND_DAMPINGS = (
+  0.28676845,
+  0.40845109,
+  0.20394083,
+  0.24044435,
+  0.04190723,
+  0.20859232,
+  0.24595532,
+  0.04243185,
+  0.03504461,
+  0.2085923,
+  0.24595532,
+  0.04243185,
+  0.03504461,
+  0.20859226,
+  0.24595528,
+  0.04243183,
+  0.0350446,
+  0.02782345,
+  0.20859229,
+  0.24595528,
+  0.04243183,
+  0.0350446,
+)
+HAND_ARMATURES = (
+  0.0032,
+  0.0032,
+  0.00265,
+  0.00265,
+  0.0006,
+  0.00265,
+  0.00265,
+  0.0006,
+  0.00042,
+  0.00265,
+  0.00265,
+  0.0006,
+  0.00042,
+  0.00265,
+  0.00265,
+  0.0006,
+  0.00042,
+  0.00012,
+  0.00265,
+  0.00265,
+  0.0006,
+  0.00042,
+)
+HAND_FRICTIONLOSSES = (
+  0.132,
+  0.132,
+  0.07456,
+  0.07456,
+  0.01276,
+  0.07456,
+  0.07456,
+  0.01276,
+  0.00378738,
+  0.07456,
+  0.07456,
+  0.01276,
+  0.00378738,
+  0.07456,
+  0.07456,
+  0.01276,
+  0.00378738,
+  0.012,
+  0.07456,
+  0.07456,
+  0.01276,
+  0.00378738,
+)
+HAND_VISCOUS_DAMPINGS = (
+  4.2e-05,
+  4.2e-05,
+  2.38e-05,
+  2.38e-05,
+  4.06e-06,
+  2.38e-05,
+  2.38e-05,
+  4.06e-06,
+  1.21e-06,
+  2.38e-05,
+  2.38e-05,
+  4.06e-06,
+  1.21e-06,
+  2.38e-05,
+  2.38e-05,
+  4.06e-06,
+  1.21e-06,
+  4.2e-05,
+  2.38e-05,
+  2.38e-05,
+  4.06e-06,
+  1.21e-06,
+)
+
 
 def _resolve_robot_mesh_paths(spec: mujoco.MjSpec) -> None:
   """Patch MuJoCo's URDF-imported basename mesh paths to absolute source paths."""
@@ -126,25 +259,39 @@ def get_iiwa_sharpa_spec() -> mujoco.MjSpec:
 
 
 def get_iiwa_sharpa_cfg() -> EntityCfg:
+  actuators = tuple(
+    BuiltinPositionActuatorCfg(
+      target_names_expr=(joint_name,),
+      stiffness=stiffness,
+      damping=damping,
+      effort_limit=effort,
+    )
+    for joint_name, stiffness, damping, effort in zip(
+      JOINT_NAMES[:7], KUKA_STIFFNESSES, KUKA_DAMPINGS, KUKA_EFFORTS, strict=True
+    )
+  ) + tuple(
+    BuiltinPositionActuatorCfg(
+      target_names_expr=(joint_name,),
+      stiffness=stiffness,
+      damping=damping,
+      armature=armature,
+      frictionloss=frictionloss,
+      viscous_damping=viscous_damping,
+    )
+    for joint_name, stiffness, damping, armature, frictionloss, viscous_damping in zip(
+      JOINT_NAMES[7:],
+      HAND_STIFFNESSES,
+      HAND_DAMPINGS,
+      HAND_ARMATURES,
+      HAND_FRICTIONLOSSES,
+      HAND_VISCOUS_DAMPINGS,
+      strict=True,
+    )
+  )
   return EntityCfg(
     spec_fn=get_iiwa_sharpa_spec,
     init_state=EntityCfg.InitialStateCfg(joint_pos=DEFAULT_JOINT_POS),
-    articulation=EntityArticulationInfoCfg(
-      actuators=(
-        BuiltinPositionActuatorCfg(
-          target_names_expr=JOINT_NAMES[:7],
-          stiffness=600.0,
-          damping=25.0,
-          effort_limit=300.0,
-        ),
-        BuiltinPositionActuatorCfg(
-          target_names_expr=JOINT_NAMES[7:],
-          stiffness=8.0,
-          damping=0.3,
-          effort_limit=4.0,
-        ),
-      ),
-    ),
+    articulation=EntityArticulationInfoCfg(actuators=actuators),
     sort_actuators=True,
   )
 
