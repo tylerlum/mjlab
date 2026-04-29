@@ -31,6 +31,7 @@ TASK_ID = "Mjlab-SimToolReal-Iiwa-Sharpa-SimpleCuboid"
 DEFAULT_POLICY_DIR = Path(
   "/home/tylerlum/github_repos/simtoolreal_private/pretrained_policy"
 )
+DEFAULT_SHOW_FRAME_AXES = True
 
 
 class _DummyRlGamesEnv:
@@ -277,12 +278,19 @@ def _capture_frame(env: ManagerBasedRlEnv, env_idx: int) -> dict[str, np.ndarray
   obj = env.scene["object"]
   goal = env.scene["goal"]
   table = env.scene["table"]
+  env_origin = env.scene.env_origins[env_idx].detach().cpu().numpy().astype(np.float32)
+
+  def local_pose(pose_wxyz: torch.Tensor) -> np.ndarray:
+    pose = _pose_xyzw(pose_wxyz)
+    pose[:3] -= env_origin
+    return pose
+
   return {
     "robot_joint_pos": robot.data.joint_pos[env_idx, :N_ACT].detach().cpu().numpy(),
-    "robot_base_pose": _pose_xyzw(robot.data.root_link_pose_w[env_idx]),
-    "object_pose": _pose_xyzw(obj.data.root_link_pose_w[env_idx]),
-    "goal_pose": _pose_xyzw(goal.data.root_link_pose_w[env_idx]),
-    "table_pose": _pose_xyzw(table.data.root_link_pose_w[env_idx]),
+    "robot_base_pose": local_pose(robot.data.root_link_pose_w[env_idx]),
+    "object_pose": local_pose(obj.data.root_link_pose_w[env_idx]),
+    "goal_pose": local_pose(goal.data.root_link_pose_w[env_idx]),
+    "table_pose": local_pose(table.data.root_link_pose_w[env_idx]),
   }
 
 
@@ -299,9 +307,7 @@ def _write_html(
   handle_is_cylinder = bool(
     sim_state["handle_is_cylinder"][env_idx].detach().cpu().item()
   )
-  object_urdf = _handle_head_urdf(
-    "object", handle_size, head_size, handle_is_cylinder
-  )
+  object_urdf = _handle_head_urdf("object", handle_size, head_size, handle_is_cylinder)
   goal_urdf = _handle_head_urdf("goal", handle_size, head_size, handle_is_cylinder)
   robots = [
     make_embedded_robot(
@@ -338,6 +344,7 @@ def _write_html(
     robot_base_poses=np.stack([f["robot_base_pose"] for f in frames]),
     dt=float(env.step_dt),
     robot_name="robot",
+    default_show_frame_axes=DEFAULT_SHOW_FRAME_AXES,
   )
   timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
   shape = "cylinder" if handle_is_cylinder else "cuboid"
@@ -384,7 +391,9 @@ def _run_one(
         frames[env_idx].append(_capture_frame(env.unwrapped, env_idx))
     print(f"rollout={rollout_idx} final_reward={final_reward:.4f} resets={done_steps}")
     for env_idx, env_frames in frames.items():
-      path = _write_html(env.unwrapped, env_frames, args.output_dir, rollout_idx, env_idx)
+      path = _write_html(
+        env.unwrapped, env_frames, args.output_dir, rollout_idx, env_idx
+      )
       print(f"rollout={rollout_idx} env={env_idx} html={path}")
   finally:
     env.close()

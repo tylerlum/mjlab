@@ -13,6 +13,10 @@ from mjlab.managers.action_manager import ActionTerm, ActionTermCfg
 from mjlab.managers.event_manager import RecomputeLevel, requires_model_fields
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.tasks.simtoolreal.assets import JOINT_NAMES, MESH_OBJECT_VARIANTS
+from mjlab.tasks.simtoolreal.object_size_distributions import (
+  OBJECT_SIZE_DISTRIBUTIONS,
+  ObjectSizeDistribution,
+)
 from mjlab.utils.lab_api.math import quat_apply, quat_from_euler_xyz
 
 if TYPE_CHECKING:
@@ -49,37 +53,6 @@ GOAL_GEOM_CFG = SceneEntityCfg(
 GOAL_HANDLE_GEOM_CFG = SceneEntityCfg("goal", geom_names=("goal_handle_geom",))
 GOAL_HEAD_GEOM_CFG = SceneEntityCfg("goal", geom_names=("goal_head_geom",))
 ROBOT_JOINT_CFG = SceneEntityCfg("robot", joint_names=JOINT_NAMES)
-
-HANDLE_HEAD_DISTRIBUTIONS = (
-  ((0.15, 0.02, 0.015), (0.30, 0.04, 0.03), (0.02, 0.05, 0.02), (0.06, 0.12, 0.06)),
-  ((0.15, 0.015), (0.30, 0.03), (0.02, 0.05, 0.02), (0.06, 0.12, 0.06)),
-  ((0.07, 0.025, 0.025), (0.12, 0.04, 0.04), (0.07, 0.01, 0.01), (0.15, 0.015, 0.015)),
-  ((0.07, 0.025), (0.12, 0.04), (0.07, 0.01, 0.01), (0.15, 0.015, 0.015)),
-  ((0.075, 0.015), (0.15, 0.03), (0.01, 0.005, 0.005), (0.03, 0.01, 0.01)),
-  ((0.10, 0.0125, 0.006), (0.20, 0.025, 0.025), (0.05, 0.03, 0.01), (0.15, 0.07, 0.03)),
-  ((0.10, 0.0125), (0.20, 0.025), (0.05, 0.03, 0.01), (0.15, 0.07, 0.03)),
-  ((0.07, 0.02, 0.02), (0.15, 0.07, 0.07), None, None),
-  ((0.05, 0.01, 0.01), (0.20, 0.04, 0.03), (0.05, 0.03, 0.03), (0.12, 0.05, 0.08)),
-  ((0.05, 0.01), (0.20, 0.03), (0.05, 0.03, 0.03), (0.12, 0.05, 0.08)),
-  ((0.05, 0.01, 0.01), (0.20, 0.04, 0.03), (0.05, 0.05, 0.02), (0.12, 0.12, 0.04)),
-  ((0.05, 0.01), (0.20, 0.03), (0.05, 0.05, 0.02), (0.12, 0.12, 0.04)),
-)
-LOW_DENSITY_RANGE = (300.0, 600.0)
-HIGH_DENSITY_RANGE = (800.0, 2000.0)
-HANDLE_HEAD_DENSITY_RANGES = (
-  (*LOW_DENSITY_RANGE, *HIGH_DENSITY_RANGE),
-  (*LOW_DENSITY_RANGE, *HIGH_DENSITY_RANGE),
-  (*LOW_DENSITY_RANGE, *HIGH_DENSITY_RANGE),
-  (*LOW_DENSITY_RANGE, *HIGH_DENSITY_RANGE),
-  (*LOW_DENSITY_RANGE, *LOW_DENSITY_RANGE),
-  (*LOW_DENSITY_RANGE, *LOW_DENSITY_RANGE),
-  (*LOW_DENSITY_RANGE, *LOW_DENSITY_RANGE),
-  (*LOW_DENSITY_RANGE, 0.0, 0.0),
-  (*LOW_DENSITY_RANGE, *LOW_DENSITY_RANGE),
-  (*LOW_DENSITY_RANGE, *LOW_DENSITY_RANGE),
-  (*LOW_DENSITY_RANGE, *LOW_DENSITY_RANGE),
-  (*LOW_DENSITY_RANGE, *LOW_DENSITY_RANGE),
-)
 
 Q_LOWER = torch.tensor(
   [
@@ -335,9 +308,7 @@ class SimToolRealJointPositionAction(ActionTerm):
     state = _state(self._env)
     episode_start = (self._env.episode_length_buf == 0) & (state["successes"] == 0)
     if episode_start.any():
-      self._action_queue[episode_start] = self._raw_actions[episode_start].unsqueeze(
-        1
-      )
+      self._action_queue[episode_start] = self._raw_actions[episode_start].unsqueeze(1)
     _update_queue(self._action_queue, self._raw_actions)
     if self.cfg.use_action_delay and self.cfg.action_delay_max > 1:
       delay_ids = torch.randint(
@@ -644,62 +615,98 @@ def reset_goal_uniform(
 
 
 def sample_handle_head_lengths(
-  env: ManagerBasedRlEnv, n: int
+  env: ManagerBasedRlEnv,
+  n: int,
+  distribution_types: tuple[str, ...] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-  handle_lengths, head_lengths, _, _ = sample_handle_head_properties(env, n)
+  handle_lengths, head_lengths, _, _ = sample_handle_head_properties(
+    env, n, distribution_types=distribution_types
+  )
   return handle_lengths, head_lengths
 
 
+def _filtered_object_size_distributions(
+  distribution_types: tuple[str, ...] | None,
+) -> list[ObjectSizeDistribution]:
+  if distribution_types is None:
+    return list(OBJECT_SIZE_DISTRIBUTIONS)
+  requested = set(distribution_types)
+  distributions = [d for d in OBJECT_SIZE_DISTRIBUTIONS if d.type in requested]
+  if not distributions:
+    valid = sorted({d.type for d in OBJECT_SIZE_DISTRIBUTIONS})
+    raise ValueError(
+      f"No SimToolReal object size distributions matched {distribution_types}. "
+      f"Valid types: {valid}"
+    )
+  return distributions
+
+
 def sample_handle_head_properties(
-  env: ManagerBasedRlEnv, n: int
+  env: ManagerBasedRlEnv,
+  n: int,
+  distribution_types: tuple[str, ...] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+  distributions = _filtered_object_size_distributions(distribution_types)
   handle_lengths = torch.zeros((n, 3), device=env.device)
   head_lengths = torch.zeros((n, 3), device=env.device)
   handle_densities = torch.zeros(n, device=env.device)
   head_densities = torch.zeros(n, device=env.device)
   handle_is_cylinder = torch.zeros(n, device=env.device, dtype=torch.bool)
-  choices = torch.randint(0, len(HANDLE_HEAD_DISTRIBUTIONS), (n,), device=env.device)
-  for i, (h_min, h_max, head_min, head_max) in enumerate(HANDLE_HEAD_DISTRIBUTIONS):
+  choices = torch.randint(0, len(distributions), (n,), device=env.device)
+  for i, dist in enumerate(distributions):
     mask = choices == i
     if not mask.any():
       continue
     count = int(mask.sum().item())
-    h_min_t = torch.tensor(h_min, device=env.device, dtype=torch.float32)
-    h_max_t = torch.tensor(h_max, device=env.device, dtype=torch.float32)
+    h_min_t = torch.tensor(
+      dist.handle_min_lengths, device=env.device, dtype=torch.float32
+    )
+    h_max_t = torch.tensor(
+      dist.handle_max_lengths, device=env.device, dtype=torch.float32
+    )
     handle = (
-      torch.rand((count, len(h_min)), device=env.device) * (h_max_t - h_min_t) + h_min_t
+      torch.rand((count, len(dist.handle_min_lengths)), device=env.device)
+      * (h_max_t - h_min_t)
+      + h_min_t
     )
     if handle.shape[1] == 2:
       handle = torch.stack([handle[:, 0], handle[:, 1], handle[:, 1]], dim=-1)
       handle_is_cylinder[mask] = True
     handle_lengths[mask] = handle
-    h_density_min, h_density_max, head_density_min, head_density_max = (
-      HANDLE_HEAD_DENSITY_RANGES[i]
-    )
     handle_densities[mask] = torch.empty(count, device=env.device).uniform_(
-      h_density_min, h_density_max
+      dist.handle_min_density, dist.handle_max_density
     )
-    if head_min is None or head_max is None:
+    if dist.head_min_lengths is None or dist.head_max_lengths is None:
       head_lengths[mask] = 0.0
       head_densities[mask] = 0.0
     else:
-      head_min_t = torch.tensor(head_min, device=env.device, dtype=torch.float32)
-      head_max_t = torch.tensor(head_max, device=env.device, dtype=torch.float32)
+      head_min_t = torch.tensor(
+        dist.head_min_lengths, device=env.device, dtype=torch.float32
+      )
+      head_max_t = torch.tensor(
+        dist.head_max_lengths, device=env.device, dtype=torch.float32
+      )
       head_lengths[mask] = (
         torch.rand((count, 3), device=env.device) * (head_max_t - head_min_t)
         + head_min_t
       )
+      assert dist.head_min_density is not None
+      assert dist.head_max_density is not None
       head_densities[mask] = torch.empty(count, device=env.device).uniform_(
-        head_density_min, head_density_max
+        dist.head_min_density, dist.head_max_density
       )
   _state(env)["_last_sampled_handle_is_cylinder"] = handle_is_cylinder
   return handle_lengths, head_lengths, handle_densities, head_densities
 
 
 def sample_handle_head_equivalent_lengths(
-  env: ManagerBasedRlEnv, n: int
+  env: ManagerBasedRlEnv,
+  n: int,
+  distribution_types: tuple[str, ...] | None = None,
 ) -> torch.Tensor:
-  handle_lengths, head_lengths = sample_handle_head_lengths(env, n)
+  handle_lengths, head_lengths = sample_handle_head_lengths(
+    env, n, distribution_types=distribution_types
+  )
   return torch.stack(
     [
       handle_lengths[:, 0] + head_lengths[:, 0],
@@ -733,9 +740,9 @@ def _capsule_x_mass_inertia(
   cylinder_mass = densities * math.pi * radius**2 * height
   hemisphere_mass = densities * (2.0 / 3.0) * math.pi * radius**3
   mass = cylinder_mass + 2.0 * hemisphere_mass
-  axis_inertia = 0.5 * cylinder_mass * radius**2 + 2.0 * (
-    2.0 / 5.0
-  ) * hemisphere_mass * radius**2
+  axis_inertia = (
+    0.5 * cylinder_mass * radius**2 + 2.0 * (2.0 / 5.0) * hemisphere_mass * radius**2
+  )
   cylinder_perp = (1.0 / 12.0) * cylinder_mass * (3.0 * radius**2 + height**2)
   hemisphere_perp = (83.0 / 320.0) * hemisphere_mass * radius**2
   hemisphere_com_offset = 0.5 * height + 3.0 * radius / 8.0
@@ -806,6 +813,7 @@ def randomize_handle_head_equivalent_size(
   env: ManagerBasedRlEnv,
   env_ids: torch.Tensor | None,
   density: float | None = None,
+  distribution_types: tuple[str, ...] | None = None,
   asset_cfg: SceneEntityCfg = OBJECT_GEOM_CFG,
   goal_asset_cfg: SceneEntityCfg = GOAL_GEOM_CFG,
   body_cfg: SceneEntityCfg = OBJECT_BODY_CFG,
@@ -815,7 +823,9 @@ def randomize_handle_head_equivalent_size(
   else:
     env_ids = env_ids.to(env.device, dtype=torch.int)
   handle_lengths, head_lengths, handle_densities, head_densities = (
-    sample_handle_head_properties(env, len(env_ids))
+    sample_handle_head_properties(
+      env, len(env_ids), distribution_types=distribution_types
+    )
   )
   state = _state(env)
   handle_is_cylinder = state["_last_sampled_handle_is_cylinder"][: len(env_ids)]
@@ -962,6 +972,7 @@ def randomize_handle_head_size(
   env: ManagerBasedRlEnv,
   env_ids: torch.Tensor | None,
   density: float | None = None,
+  distribution_types: tuple[str, ...] | None = None,
   asset_cfg: SceneEntityCfg = OBJECT_GEOM_CFG,
   goal_asset_cfg: SceneEntityCfg = GOAL_GEOM_CFG,
   body_cfg: SceneEntityCfg = OBJECT_BODY_CFG,
@@ -970,6 +981,7 @@ def randomize_handle_head_size(
     env,
     env_ids,
     density=density,
+    distribution_types=distribution_types,
     asset_cfg=asset_cfg,
     goal_asset_cfg=goal_asset_cfg,
     body_cfg=body_cfg,

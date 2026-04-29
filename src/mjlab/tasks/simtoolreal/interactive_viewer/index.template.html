@@ -221,6 +221,7 @@
       const sceneConfig = JSON.parse(document.getElementById("scene-json").textContent);
       const trajectory = sceneConfig.trajectory;
       const robotConfigs = sceneConfig.robots;
+      const DEFAULT_SHOW_FRAME_AXES = Boolean(sceneConfig.default_show_frame_axes);
 
       const timestamps = trajectory.timestamps;
       const positions = trajectory.positions;
@@ -321,7 +322,7 @@
       let currentFrame = 0;
       let isPlaying = true;
       let isLooping = true;
-      let showFrameAxes = false;
+      let showFrameAxes = DEFAULT_SHOW_FRAME_AXES;
       let playbackStartTimeMs = 0;
       let playbackStartFrame = 0;
 
@@ -677,7 +678,7 @@
 
           applyFrame(0);
           setLooping(true);
-          setFrameAxesVisible(false);
+          setFrameAxesVisible(DEFAULT_SHOW_FRAME_AXES);
           setPlaying(true);
           requestAnimationFrame(animate);
         } catch (error) {

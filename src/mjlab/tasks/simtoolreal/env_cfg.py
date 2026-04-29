@@ -28,6 +28,7 @@ def make_simtoolreal_env_cfg(
   play: bool = False,
   object_mesh_variants: bool = False,
   success_tolerance: float | None = None,
+  object_distribution_types: tuple[str, ...] | None = None,
 ) -> ManagerBasedRlEnvCfg:
   """Create the SimToolReal KUKA+Sharpa training environment.
 
@@ -88,7 +89,11 @@ def make_simtoolreal_env_cfg(
       params=(
         {"goal_asset_cfg": goal_geom_cfg}
         if object_mesh_variants
-        else {"asset_cfg": object_geom_cfg, "goal_asset_cfg": goal_geom_cfg}
+        else {
+          "asset_cfg": object_geom_cfg,
+          "goal_asset_cfg": goal_geom_cfg,
+          "distribution_types": object_distribution_types,
+        }
       ),
     ),
     "reset_object": EventTermCfg(

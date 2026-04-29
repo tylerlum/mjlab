@@ -179,6 +179,18 @@ def test_simtoolreal_success_tolerance_can_be_overridden() -> None:
   assert cfg.terminations["success_update"].params["tolerance"] == pytest.approx(0.075)
 
 
+def test_simtoolreal_object_distribution_types_config_threads_to_reset_event() -> None:
+  cfg = make_simtoolreal_env_cfg(
+    play=True,
+    object_distribution_types=("simple_cuboid", "simple_cylinder"),
+  )
+
+  assert cfg.events["randomize_object_size"].params["distribution_types"] == (
+    "simple_cuboid",
+    "simple_cylinder",
+  )
+
+
 def test_simtoolreal_object_uses_separate_handle_and_head_geoms() -> None:
   device = "cuda:0" if torch.cuda.is_available() else "cpu"
   cfg = load_env_cfg(TASK_ID, play=True)
@@ -287,6 +299,38 @@ def test_simtoolreal_success_tolerance_curriculum_updates_reward_and_done_terms(
     assert env.termination_manager.get_term_cfg("success_update").params[
       "tolerance"
     ] == pytest.approx(0.0675)
+  finally:
+    env.close()
+
+
+def test_simtoolreal_object_distribution_filter_matches_source_ranges() -> None:
+  cfg = load_env_cfg(TASK_ID, play=True)
+  cfg.scene.num_envs = 16
+
+  env = ManagerBasedRlEnv(cfg=cfg, device="cpu")
+  try:
+    env.reset()
+    env_ids = torch.arange(env.num_envs, device=env.device)
+    mdp.randomize_handle_head_equivalent_size(
+      env,
+      env_ids,
+      distribution_types=("simple_cuboid", "simple_cylinder"),
+    )
+    state = mdp._state(env)
+    handle_lengths = state["handle_lengths"]
+    head_lengths = state["head_lengths"]
+
+    assert torch.all(handle_lengths[:, 0] >= 0.10)
+    assert torch.all(handle_lengths[:, 0] <= 0.25)
+    assert torch.all(handle_lengths[:, 1] >= 0.03)
+    assert torch.all(handle_lengths[:, 1] <= 0.07)
+    assert torch.all(handle_lengths[:, 2] >= 0.03)
+    assert torch.all(handle_lengths[:, 2] <= 0.07)
+    assert torch.allclose(head_lengths, torch.zeros_like(head_lengths))
+    torch.testing.assert_close(
+      state["object_scales"],
+      handle_lengths / mdp.OBJECT_BASE_SIZE,
+    )
   finally:
     env.close()
 

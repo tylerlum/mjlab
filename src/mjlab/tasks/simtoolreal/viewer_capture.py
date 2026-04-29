@@ -24,6 +24,10 @@ class SimToolRealViewerCaptureCfg:
   env_index: int = 0
   wandb_key: str = "interactive_viewer"
   log_to_wandb: bool = True
+  github_raw_base: str = "https://raw.githubusercontent.com/tylerlum/simtoolreal/main/"
+  url_check: str = "warn"
+  object_urdf_relpath: str | None = None
+  default_show_frame_axes: bool = False
 
 
 class SimToolRealViewerCaptureWrapper:
@@ -86,12 +90,21 @@ class SimToolRealViewerCaptureWrapper:
     goal = self.env.scene["goal"]
     table = self.env.scene["table"]
     env_index = self.cfg.env_index
+    env_origin = (
+      self.env.scene.env_origins[env_index].detach().cpu().numpy().astype(np.float32)
+    )
+
+    def local_pose(pose_wxyz: torch.Tensor) -> np.ndarray:
+      pose = self._pose_xyzw(pose_wxyz)
+      pose[:3] -= env_origin
+      return pose
+
     return {
       "robot_joint_pos": robot.data.joint_pos[env_index, :N_ACT].detach().cpu().numpy(),
-      "robot_base_pose": self._pose_xyzw(robot.data.root_link_pose_w[env_index]),
-      "object_pose": self._pose_xyzw(obj.data.root_link_pose_w[env_index]),
-      "goal_pose": self._pose_xyzw(goal.data.root_link_pose_w[env_index]),
-      "table_pose": self._pose_xyzw(table.data.root_link_pose_w[env_index]),
+      "robot_base_pose": local_pose(robot.data.root_link_pose_w[env_index]),
+      "object_pose": local_pose(obj.data.root_link_pose_w[env_index]),
+      "goal_pose": local_pose(goal.data.root_link_pose_w[env_index]),
+      "table_pose": local_pose(table.data.root_link_pose_w[env_index]),
     }
 
   def _box_urdf(self, name: str, size: tuple[float, float, float]) -> str:
@@ -162,11 +175,120 @@ class SimToolRealViewerCaptureWrapper:
   </link>
 </robot>"""
 
+  def _github_raw_url(self, relpath: str) -> str:
+    base = self.cfg.github_raw_base.strip()
+    if not base:
+      base = "https://raw.githubusercontent.com/tylerlum/simtoolreal/main/"
+    return base.rstrip("/") + "/" + relpath.lstrip("/")
+
+  @staticmethod
+  def _check_viewer_urls(urls: list[str], url_check: str) -> set[str]:
+    """Validate URL-backed viewer assets with IsaacGym-style warn/error/skip modes."""
+    import time
+    import urllib.request
+
+    mode = url_check.lower()
+    if mode not in {"warn", "error", "skip"}:
+      raise ValueError(f"url_check must be one of warn/error/skip, got {url_check!r}")
+    failed: set[str] = set()
+    if mode == "skip":
+      print(
+        "[SimToolReal viewer] URL check skipped. "
+        "URL-backed mesh objects may fail to load in the browser."
+      )
+      return failed
+
+    for url in dict.fromkeys(urls):
+      print(f"[SimToolReal viewer] URL check ({mode}): {url}")
+      start = time.monotonic()
+      try:
+        req = urllib.request.Request(url, method="HEAD")
+        urllib.request.urlopen(req, timeout=10)
+      except Exception as exc:
+        failed.add(url)
+        msg = (
+          "\n" + "=" * 72 + "\n"
+          "[SimToolReal viewer] URL CHECK FAILED\n"
+          f"  URL   : {url}\n"
+          f"  Error : {exc}\n"
+          "  Common fixes: push the commit containing the asset, set "
+          "github_raw_base to a reachable branch/commit, or set url_check='skip'.\n"
+          + "="
+          * 72
+        )
+        if mode == "error":
+          raise ValueError(msg) from exc
+        print(msg)
+      else:
+        print(f"[SimToolReal viewer]   passed in {time.monotonic() - start:.2f}s")
+    return failed
+
+  def _make_object_viewer_robots(
+    self,
+    make_embedded_robot,
+    make_url_robot,
+    object_urdf: str,
+  ) -> tuple[dict, dict]:
+    """Use inline primitive URDFs by default; use GitHub raw URLs for mesh objects."""
+    if self.cfg.object_urdf_relpath is None:
+      print(
+        "[SimToolReal viewer] Using embedded primitive handle/head URDF for "
+        "object and goal; no GitHub object URL needed."
+      )
+      return (
+        make_embedded_robot(
+          name="object",
+          urdf_text=object_urdf,
+          animated=False,
+          color_override=(0.1, 0.45, 0.95),
+        ),
+        make_embedded_robot(
+          name="goal",
+          urdf_text=object_urdf,
+          animated=False,
+          color_override=(0.1, 0.8, 0.25),
+        ),
+      )
+
+    object_url = self._github_raw_url(self.cfg.object_urdf_relpath)
+    print(
+      "[SimToolReal viewer] Using URL-backed mesh object for object and goal:\n"
+      f"  {object_url}"
+    )
+    failed_urls = self._check_viewer_urls([object_url], self.cfg.url_check)
+    if object_url in failed_urls:
+      fallback_url = self._github_raw_url(
+        "assets/urdf/dextoolbench/hammer/claw_hammer/claw_hammer.urdf"
+      )
+      print(
+        "[SimToolReal viewer] Falling back to claw_hammer visual because the "
+        "configured object URL failed. Object shape will be wrong until the "
+        "URL is fixed.\n"
+        f"  failed   : {object_url}\n"
+        f"  fallback : {fallback_url}"
+      )
+      object_url = fallback_url
+    return (
+      make_url_robot(
+        name="object",
+        urdf_url=object_url,
+        animated=False,
+        color_override=(0.1, 0.45, 0.95),
+      ),
+      make_url_robot(
+        name="goal",
+        urdf_url=object_url,
+        animated=False,
+        color_override=(0.1, 0.8, 0.25),
+      ),
+    )
+
   def _finalize_capture(self) -> None:
     assert self._frames is not None
     from mjlab.tasks.simtoolreal.interactive_viewer import (
       create_html,
       make_embedded_robot,
+      make_url_robot,
     )
 
     robot_urdf = read_robot_urdf_for_viewer()
@@ -177,15 +299,13 @@ class SimToolRealViewerCaptureWrapper:
     handle_is_cylinder = bool(
       sim_state["handle_is_cylinder"][env_index].detach().cpu().item()
     )
-    object_urdf = (
-      self._handle_head_urdf("object", handle_size, head_size, handle_is_cylinder)
-      if any(x > 1.0e-5 for x in head_size)
-      else self._handle_head_urdf("object", handle_size, head_size, handle_is_cylinder)
+    object_urdf = self._handle_head_urdf(
+      "object", handle_size, head_size, handle_is_cylinder
     )
-    goal_urdf = (
-      self._handle_head_urdf("goal", handle_size, head_size, handle_is_cylinder)
-      if any(x > 1.0e-5 for x in head_size)
-      else self._handle_head_urdf("goal", handle_size, head_size, handle_is_cylinder)
+    object_robot, goal_robot = self._make_object_viewer_robots(
+      make_embedded_robot,
+      make_url_robot,
+      object_urdf,
     )
     robots = [
       make_embedded_robot(
@@ -193,18 +313,8 @@ class SimToolRealViewerCaptureWrapper:
         urdf_text=robot_urdf,
         animated=True,
       ),
-      make_embedded_robot(
-        name="object",
-        urdf_text=object_urdf,
-        animated=False,
-        color_override=(0.1, 0.45, 0.95),
-      ),
-      make_embedded_robot(
-        name="goal",
-        urdf_text=goal_urdf,
-        animated=False,
-        color_override=(0.1, 0.8, 0.25),
-      ),
+      object_robot,
+      goal_robot,
       make_embedded_robot(
         name="table",
         urdf_text=self._box_urdf("table", (0.475, 0.4, 0.3)),
@@ -224,11 +334,11 @@ class SimToolRealViewerCaptureWrapper:
       robot_base_poses=np.stack([f["robot_base_pose"] for f in self._frames]),
       dt=float(self.env.step_dt),
       robot_name="robot",
+      default_show_frame_axes=self.cfg.default_show_frame_axes,
     )
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     path = (
-      self.cfg.output_dir
-      / f"{timestamp}_env{env_index}_viewer_{self.step_count}.html"
+      self.cfg.output_dir / f"{timestamp}_env{env_index}_viewer_{self.step_count}.html"
     )
     path.write_text(html, encoding="utf-8")
     if self.cfg.log_to_wandb:
