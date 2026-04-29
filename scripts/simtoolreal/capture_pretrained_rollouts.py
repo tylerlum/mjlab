@@ -235,12 +235,10 @@ def _handle_head_urdf(
     if handle_is_cylinder
     else f'<box size="{hx} {hy} {hz}"/>'
   )
-  total_x = hx + max(tx, 0.0)
-  handle_x = -0.5 * total_x + 0.5 * hx if tx > 1.0e-5 else 0.0
   handle_origin = (
-    f'<origin xyz="{handle_x} 0 0" rpy="0 {np.pi / 2.0} 0"/>'
+    f'<origin xyz="0 0 0" rpy="0 {np.pi / 2.0} 0"/>'
     if handle_is_cylinder
-    else f'<origin xyz="{handle_x} 0 0"/>'
+    else '<origin xyz="0 0 0"/>'
   )
   if tx <= 1.0e-5:
     return f"""<robot name="{name}">
@@ -249,7 +247,7 @@ def _handle_head_urdf(
     <collision>{handle_origin}<geometry>{geometry}</geometry></collision>
   </link>
 </robot>"""
-  head_x = 0.5 * total_x - 0.5 * tx
+  head_x = 0.5 * hx + 0.5 * tx
   return f"""<robot name="{name}">
   <link name="{name}">
     <visual>{handle_origin}<geometry>{geometry}</geometry></visual>

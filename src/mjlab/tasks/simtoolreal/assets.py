@@ -76,10 +76,38 @@ DEFAULT_GEOM_FRICTION = (DEFAULT_ASSET_FRICTION, 0.005, 0.0001)
 FINGERTIP_GEOM_FRICTION = (FINGERTIP_FRICTION, 0.005, 0.0001)
 CYLINDER_X_QUAT = (0.7071067811865476, 0.0, 0.7071067811865475, 0.0)
 MESH_OBJECT_VARIANTS = (
-  ("cuboid_hammer", "box", (0.165, 0.030, 0.026), (0.085, 0.055, 0.060), 0.075),
-  ("cylinder_hammer", "cylinder", (0.165, 0.030, 0.030), (0.085, 0.055, 0.060), 0.075),
-  ("cuboid_marker", "box", (0.130, 0.035, 0.032), (0.0, 0.0, 0.0), 0.045),
-  ("cylinder_marker", "cylinder", (0.130, 0.028, 0.028), (0.0, 0.0, 0.0), 0.045),
+  (
+    "cuboid_hammer",
+    "box",
+    (0.165, 0.030, 0.026),
+    (0.085, 0.055, 0.060),
+    450.0,
+    1200.0,
+  ),
+  (
+    "cylinder_hammer",
+    "cylinder",
+    (0.165, 0.030, 0.030),
+    (0.085, 0.055, 0.060),
+    450.0,
+    1200.0,
+  ),
+  (
+    "cuboid_marker",
+    "box",
+    (0.130, 0.035, 0.032),
+    (0.0, 0.0, 0.0),
+    450.0,
+    0.0,
+  ),
+  (
+    "cylinder_marker",
+    "cylinder",
+    (0.130, 0.028, 0.028),
+    (0.0, 0.0, 0.0),
+    450.0,
+    0.0,
+  ),
 )
 FINGERTIP_LINK_NAMES = (
   "left_index_DP",
@@ -366,7 +394,7 @@ def get_object_spec(
   body.add_geom(
     name="object_handle_geom",
     type=handle_type,
-    pos=(-0.025, 0.0, 0.0),
+    pos=(0.0, 0.0, 0.0),
     quat=CYLINDER_X_QUAT if handle_shape == "cylinder" else (1.0, 0.0, 0.0, 0.0),
     size=handle_size,
     mass=0.75 * mass,
@@ -377,7 +405,7 @@ def get_object_spec(
   body.add_geom(
     name="object_head_geom",
     type=mujoco.mjtGeom.mjGEOM_BOX,
-    pos=(0.075, 0.0, 0.0),
+    pos=(handle_half_size[0] + head_half_size[0], 0.0, 0.0),
     size=head_half_size,
     mass=0.25 * mass,
     rgba=(0.45, 0.45, 0.45, 1.0),
@@ -411,13 +439,12 @@ def get_object_mesh_variant_spec(
   handle_shape: str,
   handle_lengths: tuple[float, float, float],
   head_lengths: tuple[float, float, float],
-  mass: float,
+  handle_density: float,
+  head_density: float,
 ) -> mujoco.MjSpec:
   spec = mujoco.MjSpec()
   has_head = head_lengths[0] > 1.0e-5
-  total_x = handle_lengths[0] + max(head_lengths[0], 0.0)
-  handle_center_x = -0.5 * total_x + 0.5 * handle_lengths[0]
-  head_center_x = 0.5 * total_x - 0.5 * max(head_lengths[0], 1.0e-4)
+  head_center_x = 0.5 * handle_lengths[0] + 0.5 * max(head_lengths[0], 1.0e-4)
 
   handle_mesh = (
     _cylinder_x_mesh(handle_lengths[0], handle_lengths[1])
@@ -435,8 +462,8 @@ def get_object_mesh_variant_spec(
     name="object_handle_geom",
     type=mujoco.mjtGeom.mjGEOM_MESH,
     meshname="handle_mesh",
-    pos=(handle_center_x, 0.0, 0.0),
-    mass=0.75 * mass if has_head else mass,
+    pos=(0.0, 0.0, 0.0),
+    density=handle_density,
     rgba=(0.45, 0.45, 0.45, 1.0),
     friction=DEFAULT_GEOM_FRICTION,
     condim=6,
@@ -446,7 +473,7 @@ def get_object_mesh_variant_spec(
     type=mujoco.mjtGeom.mjGEOM_MESH,
     meshname="head_mesh",
     pos=(head_center_x, 0.0, 0.0),
-    mass=0.25 * mass if has_head else 1.0e-6,
+    density=head_density if has_head else 1.0,
     rgba=(0.45, 0.45, 0.45, 1.0),
     friction=DEFAULT_GEOM_FRICTION,
     condim=6,
@@ -472,18 +499,23 @@ def get_object_mesh_variant_cfg() -> VariantEntityCfg:
     variants={
       name: VariantCfg(
         spec_fn=(
-          lambda shape=shape, handle=handle, head=head, mass=mass: (
+          lambda shape=shape,
+          handle=handle,
+          head=head,
+          handle_density=handle_density,
+          head_density=head_density: (
             get_object_mesh_variant_spec(
               handle_shape=shape,
               handle_lengths=handle,
               head_lengths=head,
-              mass=mass,
+              handle_density=handle_density,
+              head_density=head_density,
             )
           )
         ),
         weight=1.0,
       )
-      for name, shape, handle, head, mass in MESH_OBJECT_VARIANTS
+      for name, shape, handle, head, handle_density, head_density in MESH_OBJECT_VARIANTS
     },
     init_state=EntityCfg.InitialStateCfg(
       pos=(0.0, 0.0, 0.63),
@@ -513,7 +545,7 @@ def get_goal_spec(
   body.add_geom(
     name="goal_handle_geom",
     type=handle_type,
-    pos=(-0.025, 0.0, 0.0),
+    pos=(0.0, 0.0, 0.0),
     quat=CYLINDER_X_QUAT if handle_shape == "cylinder" else (1.0, 0.0, 0.0, 0.0),
     size=handle_size,
     rgba=(0.1, 0.8, 0.2, 0.35),
@@ -523,7 +555,7 @@ def get_goal_spec(
   body.add_geom(
     name="goal_head_geom",
     type=mujoco.mjtGeom.mjGEOM_BOX,
-    pos=(0.075, 0.0, 0.0),
+    pos=(handle_half_size[0] + head_half_size[0], 0.0, 0.0),
     size=head_half_size,
     rgba=(0.1, 0.8, 0.2, 0.35),
     contype=0,

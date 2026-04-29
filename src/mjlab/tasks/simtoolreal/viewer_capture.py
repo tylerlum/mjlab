@@ -135,13 +135,11 @@ class SimToolRealViewerCaptureWrapper:
     </collision>
   </link>
 </robot>"""
-    total_x = hx + tx
-    handle_x = -0.5 * total_x + 0.5 * hx
-    head_x = 0.5 * total_x - 0.5 * tx
+    head_x = 0.5 * hx + 0.5 * tx
     handle_origin = (
-      f'<origin xyz="{handle_x} 0 0" rpy="0 {np.pi / 2.0} 0"/>'
+      f'<origin xyz="0 0 0" rpy="0 {np.pi / 2.0} 0"/>'
       if handle_is_cylinder
-      else f'<origin xyz="{handle_x} 0 0"/>'
+      else '<origin xyz="0 0 0"/>'
     )
     return f"""<robot name="{name}">
   <link name="{name}">

@@ -149,10 +149,20 @@ def test_simtoolreal_mesh_variants_assign_cuboids_and_cylinders() -> None:
       False,
       True,
     ]
+    goal = env.scene["goal"]
+    goal_geom_ids = goal.indexing.geom_ids[mdp.GOAL_GEOM_CFG.geom_ids]
     torch.testing.assert_close(
-      state["object_masses"].detach().cpu(),
-      torch.tensor([0.075, 0.075, 0.045, 0.045]),
+      env.sim.model.geom_pos[:, goal_geom_ids[0], :3].detach().cpu(),
+      torch.zeros(4, 3),
     )
+    expected_head_x = 0.5 * (
+      state["handle_lengths"][:, 0] + state["head_lengths"].clamp_min(1.0e-4)[:, 0]
+    )
+    torch.testing.assert_close(
+      env.sim.model.geom_pos[:, goal_geom_ids[1], 0].detach().cpu(),
+      expected_head_x.detach().cpu(),
+    )
+    assert torch.all(state["object_masses"] > 0.0)
     assert torch.isfinite(obs["actor"]).all()
 
     action = torch.zeros((env.num_envs, N_ACT), device=env.device)

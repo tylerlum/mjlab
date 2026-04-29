@@ -615,6 +615,56 @@ def sample_handle_head_equivalent_lengths(
   )
 
 
+def _box_mass_inertia(
+  lengths: torch.Tensor, densities: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+  mass = densities * torch.prod(lengths, dim=-1)
+  inertia = torch.stack(
+    [
+      mass * (lengths[:, 1] ** 2 + lengths[:, 2] ** 2) / 12.0,
+      mass * (lengths[:, 0] ** 2 + lengths[:, 2] ** 2) / 12.0,
+      mass * (lengths[:, 0] ** 2 + lengths[:, 1] ** 2) / 12.0,
+    ],
+    dim=-1,
+  )
+  return mass, inertia
+
+
+def _capsule_x_mass_inertia(
+  lengths: torch.Tensor, densities: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+  height = lengths[:, 0]
+  radius = 0.5 * lengths[:, 1]
+  cylinder_mass = densities * math.pi * radius**2 * height
+  hemisphere_mass = densities * (2.0 / 3.0) * math.pi * radius**3
+  mass = cylinder_mass + 2.0 * hemisphere_mass
+  axis_inertia = 0.5 * cylinder_mass * radius**2 + 2.0 * (
+    2.0 / 5.0
+  ) * hemisphere_mass * radius**2
+  cylinder_perp = (1.0 / 12.0) * cylinder_mass * (3.0 * radius**2 + height**2)
+  hemisphere_perp = (83.0 / 320.0) * hemisphere_mass * radius**2
+  hemisphere_com_offset = 0.5 * height + 3.0 * radius / 8.0
+  perp_inertia = cylinder_perp + 2.0 * (
+    hemisphere_perp + hemisphere_mass * hemisphere_com_offset**2
+  )
+  return mass, torch.stack([axis_inertia, perp_inertia, perp_inertia], dim=-1)
+
+
+def _handle_mass_inertia(
+  handle_lengths: torch.Tensor,
+  handle_densities: torch.Tensor,
+  handle_is_cylinder: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+  box_mass, box_inertia = _box_mass_inertia(handle_lengths, handle_densities)
+  capsule_mass, capsule_inertia = _capsule_x_mass_inertia(
+    handle_lengths, handle_densities
+  )
+  mask = handle_is_cylinder[:, None]
+  mass = torch.where(handle_is_cylinder, capsule_mass, box_mass)
+  inertia = torch.where(mask, capsule_inertia, box_inertia)
+  return mass, inertia
+
+
 @requires_model_fields("geom_size", "geom_rbound", "geom_aabb")
 def randomize_simple_cuboid_size(
   env: ManagerBasedRlEnv,
@@ -672,6 +722,8 @@ def randomize_handle_head_equivalent_size(
   handle_lengths, head_lengths, handle_densities, head_densities = (
     sample_handle_head_properties(env, len(env_ids))
   )
+  state = _state(env)
+  handle_is_cylinder = state["_last_sampled_handle_is_cylinder"][: len(env_ids)]
   if density is not None:
     handle_densities[:] = density
     head_densities = torch.where(
@@ -679,20 +731,11 @@ def randomize_handle_head_equivalent_size(
       torch.full_like(head_densities, density),
       torch.zeros_like(head_densities),
     )
-  lengths = torch.stack(
-    [
-      handle_lengths[:, 0] + head_lengths[:, 0],
-      torch.maximum(handle_lengths[:, 1], head_lengths[:, 1]),
-      torch.maximum(handle_lengths[:, 2], head_lengths[:, 2]),
-    ],
-    dim=-1,
-  )
   min_geom_size = torch.full_like(head_lengths, 1.0e-4)
   head_geom_lengths = torch.where(head_lengths > 0.0, head_lengths, min_geom_size)
   handle_centers = torch.zeros_like(handle_lengths)
   head_centers = torch.zeros_like(head_lengths)
-  handle_centers[:, 0] = -0.5 * lengths[:, 0] + 0.5 * handle_lengths[:, 0]
-  head_centers[:, 0] = 0.5 * lengths[:, 0] - 0.5 * head_geom_lengths[:, 0]
+  head_centers[:, 0] = 0.5 * handle_lengths[:, 0] + 0.5 * head_geom_lengths[:, 0]
 
   obj = _object(env)
   goal = _goal(env)
@@ -711,30 +754,24 @@ def randomize_handle_head_equivalent_size(
   _recompute_geom_bounds(env, env_ids=env_ids, asset_cfg=goal_asset_cfg)
 
   body_ids = obj.indexing.body_ids[body_cfg.body_ids]
-  handle_mass = handle_densities * torch.prod(handle_lengths, dim=-1)
-  head_mass = head_densities * torch.prod(head_lengths, dim=-1)
+  handle_mass, handle_inertia = _handle_mass_inertia(
+    handle_lengths, handle_densities, handle_is_cylinder
+  )
+  head_mass, head_inertia_local = _box_mass_inertia(head_lengths, head_densities)
   mass = (handle_mass + head_mass).clamp_min(1.0e-6)
   com_x = (handle_mass * handle_centers[:, 0] + head_mass * head_centers[:, 0]) / mass
   handle_dx = handle_centers[:, 0] - com_x
   head_dx = head_centers[:, 0] - com_x
-  handle_inertia = torch.stack(
+  handle_inertia = handle_inertia + torch.stack(
     [
-      handle_mass * (handle_lengths[:, 1] ** 2 + handle_lengths[:, 2] ** 2) / 12.0,
-      handle_mass * (handle_lengths[:, 0] ** 2 + handle_lengths[:, 2] ** 2) / 12.0
-      + handle_mass * handle_dx**2,
-      handle_mass * (handle_lengths[:, 0] ** 2 + handle_lengths[:, 1] ** 2) / 12.0
-      + handle_mass * handle_dx**2,
+      torch.zeros_like(handle_dx),
+      handle_mass * handle_dx**2,
+      handle_mass * handle_dx**2,
     ],
     dim=-1,
   )
-  head_inertia = torch.stack(
-    [
-      head_mass * (head_lengths[:, 1] ** 2 + head_lengths[:, 2] ** 2) / 12.0,
-      head_mass * (head_lengths[:, 0] ** 2 + head_lengths[:, 2] ** 2) / 12.0
-      + head_mass * head_dx**2,
-      head_mass * (head_lengths[:, 0] ** 2 + head_lengths[:, 1] ** 2) / 12.0
-      + head_mass * head_dx**2,
-    ],
+  head_inertia = head_inertia_local + torch.stack(
+    [torch.zeros_like(head_dx), head_mass * head_dx**2, head_mass * head_dx**2],
     dim=-1,
   )
   inertia = (handle_inertia + head_inertia).clamp_min(1.0e-8)
@@ -742,13 +779,10 @@ def randomize_handle_head_equivalent_size(
   env.sim.model.body_ipos[env_ids[:, None], body_ids, :] = 0.0
   env.sim.model.body_ipos[env_ids[:, None], body_ids, 0] = com_x[:, None]
   env.sim.model.body_inertia[env_ids[:, None], body_ids] = inertia[:, None, :]
-  state = _state(env)
   state["handle_lengths"][env_ids] = handle_lengths
   state["head_lengths"][env_ids] = head_lengths
-  state["handle_is_cylinder"][env_ids] = state[
-    "_last_sampled_handle_is_cylinder"
-  ][: len(env_ids)]
-  state["object_scales"][env_ids] = lengths / OBJECT_BASE_SIZE
+  state["handle_is_cylinder"][env_ids] = handle_is_cylinder
+  state["object_scales"][env_ids] = handle_lengths / OBJECT_BASE_SIZE
   state["object_masses"][env_ids] = mass
 
 
@@ -779,29 +813,35 @@ def set_handle_head_mesh_variant_state(
   masses = torch.zeros(len(env_ids), device=env.device)
   handle_is_cylinder = torch.zeros(len(env_ids), device=env.device, dtype=torch.bool)
   selected = variant_ids[env_ids]
-  for idx, (_name, shape, handle, head, mass) in enumerate(MESH_OBJECT_VARIANTS):
+  handle_densities = torch.zeros(len(env_ids), device=env.device)
+  head_densities = torch.zeros(len(env_ids), device=env.device)
+  for idx, (
+    _name,
+    shape,
+    handle,
+    head,
+    handle_density,
+    head_density,
+  ) in enumerate(MESH_OBJECT_VARIANTS):
     mask = selected == idx
     if not mask.any():
       continue
     handle_lengths[mask] = torch.tensor(handle, device=env.device)
     head_lengths[mask] = torch.tensor(head, device=env.device)
-    masses[mask] = mass
     handle_is_cylinder[mask] = shape == "cylinder"
-
-  lengths = torch.stack(
-    [
-      handle_lengths[:, 0] + head_lengths[:, 0],
-      torch.maximum(handle_lengths[:, 1], head_lengths[:, 1]),
-      torch.maximum(handle_lengths[:, 2], head_lengths[:, 2]),
-    ],
-    dim=-1,
+    handle_densities[mask] = handle_density
+    head_densities[mask] = head_density
+  handle_mass, _ = _handle_mass_inertia(
+    handle_lengths, handle_densities, handle_is_cylinder
   )
+  head_mass, _ = _box_mass_inertia(head_lengths, head_densities)
+  masses = handle_mass + head_mass
+
   min_geom_size = torch.full_like(head_lengths, 1.0e-4)
   head_geom_lengths = torch.where(head_lengths > 0.0, head_lengths, min_geom_size)
   handle_centers = torch.zeros_like(handle_lengths)
   head_centers = torch.zeros_like(head_lengths)
-  handle_centers[:, 0] = -0.5 * lengths[:, 0] + 0.5 * handle_lengths[:, 0]
-  head_centers[:, 0] = 0.5 * lengths[:, 0] - 0.5 * head_geom_lengths[:, 0]
+  head_centers[:, 0] = 0.5 * handle_lengths[:, 0] + 0.5 * head_geom_lengths[:, 0]
 
   goal = _goal(env)
   goal_geom_ids = goal.indexing.geom_ids[goal_asset_cfg.geom_ids]
@@ -819,7 +859,7 @@ def set_handle_head_mesh_variant_state(
   state["handle_lengths"][env_ids] = handle_lengths
   state["head_lengths"][env_ids] = head_lengths
   state["handle_is_cylinder"][env_ids] = handle_is_cylinder
-  state["object_scales"][env_ids] = lengths / OBJECT_BASE_SIZE
+  state["object_scales"][env_ids] = handle_lengths / OBJECT_BASE_SIZE
   state["object_masses"][env_ids] = masses
 
 
