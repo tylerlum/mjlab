@@ -157,6 +157,12 @@ def parse_args() -> argparse.Namespace:
     help="Write one HTML trajectory for every parallel env.",
   )
   parser.add_argument(
+    "--success-tolerance",
+    type=float,
+    default=0.01,
+    help="Success tolerance before keypointScale; pretrained eval defaults to 0.01.",
+  )
+  parser.add_argument(
     "--output-dir",
     type=Path,
     default=Path("artifacts/simtoolreal_private_pretrained_rollouts"),
@@ -175,12 +181,20 @@ def _make_env(
   steps: int,
   num_envs: int,
   object_mesh_variants: bool,
+  success_tolerance: float,
 ) -> SimToolRealViewerCaptureWrapper:
   env_cfg = (
-    make_simtoolreal_env_cfg(play=True, object_mesh_variants=True)
+    make_simtoolreal_env_cfg(
+      play=True,
+      object_mesh_variants=True,
+      success_tolerance=success_tolerance,
+    )
     if object_mesh_variants
     else load_env_cfg(TASK_ID, play=True)
   )
+  if not object_mesh_variants:
+    env_cfg.rewards["success"].params["tolerance"] = success_tolerance
+    env_cfg.terminations["success_update"].params["tolerance"] = success_tolerance
   env_cfg.scene.num_envs = num_envs
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=None)
   return SimToolRealViewerCaptureWrapper(
@@ -343,6 +357,7 @@ def _run_one(
     args.steps,
     args.num_envs,
     args.object_mesh_variants,
+    args.success_tolerance,
   )
   try:
     obs, _ = env.reset(seed=args.seed + rollout_idx)

@@ -94,6 +94,8 @@ def test_simtoolreal_training_cfg_matches_source_cadence_and_randomization() -> 
   assert cfg.events["reset_goal"].params["z_range"] == pytest.approx((0.68, 1.05))
   assert "goal_reached" not in cfg.terminations
   assert cfg.terminations["max_successes"].func is mdp.max_consecutive_successes_reached
+  assert cfg.rewards["success"].params["tolerance"] == pytest.approx(0.075)
+  assert cfg.terminations["success_update"].params["tolerance"] == pytest.approx(0.075)
   assert "fingertip_delta" in cfg.rewards
 
 
@@ -106,6 +108,15 @@ def test_simtoolreal_play_cfg_disables_training_noise() -> None:
   assert not obs_term.params["use_object_state_delay_noise"]
   assert obs_term.params["joint_velocity_obs_noise_std"] == 0.0
   assert not cfg.actions["joint_pos"].use_action_delay
+  assert cfg.rewards["success"].params["tolerance"] == pytest.approx(0.01)
+  assert cfg.terminations["success_update"].params["tolerance"] == pytest.approx(0.01)
+
+
+def test_simtoolreal_success_tolerance_can_be_overridden() -> None:
+  cfg = make_simtoolreal_env_cfg(play=True, success_tolerance=0.075)
+
+  assert cfg.rewards["success"].params["tolerance"] == pytest.approx(0.075)
+  assert cfg.terminations["success_update"].params["tolerance"] == pytest.approx(0.075)
 
 
 def test_simtoolreal_object_uses_separate_handle_and_head_geoms() -> None:

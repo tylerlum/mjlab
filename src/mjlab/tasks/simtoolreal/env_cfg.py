@@ -24,7 +24,9 @@ from mjlab.viewer import ViewerConfig
 
 
 def make_simtoolreal_env_cfg(
-  play: bool = False, object_mesh_variants: bool = False
+  play: bool = False,
+  object_mesh_variants: bool = False,
+  success_tolerance: float | None = None,
 ) -> ManagerBasedRlEnvCfg:
   """Create the SimToolReal KUKA+Sharpa training environment.
 
@@ -33,6 +35,8 @@ def make_simtoolreal_env_cfg(
   separate per-world box geoms for the handle and head; cylinder handles from the
   source distribution are approximated by cuboidal handles.
   """
+  if success_tolerance is None:
+    success_tolerance = 0.01 if play else 0.075
   simtoolreal_obs = ObservationTermCfg(
     func=mdp.simtoolreal_observation,
     params={
@@ -154,7 +158,11 @@ def make_simtoolreal_env_cfg(
     "lift_bonus": RewardTermCfg(func=mdp.lifting_bonus_reward, weight=1.0),
     "fingertip_delta": RewardTermCfg(func=mdp.fingertip_delta_reward, weight=50.0),
     "keypoint_delta": RewardTermCfg(func=mdp.keypoint_delta_reward, weight=200.0),
-    "success": RewardTermCfg(func=mdp.success_bonus, weight=1.0),
+    "success": RewardTermCfg(
+      func=mdp.success_bonus,
+      weight=1.0,
+      params={"tolerance": success_tolerance},
+    ),
     "kuka_action_penalty": RewardTermCfg(func=mdp.kuka_action_penalty, weight=1.0),
     "hand_action_penalty": RewardTermCfg(func=mdp.hand_action_penalty, weight=1.0),
     "object_velocity": RewardTermCfg(func=mdp.object_velocity_penalty, weight=0.0),
@@ -164,7 +172,10 @@ def make_simtoolreal_env_cfg(
     "time_out": TerminationTermCfg(func=time_out, time_out=True),
     "object_fell": TerminationTermCfg(func=mdp.object_fell),
     "hand_far_from_object": TerminationTermCfg(func=mdp.hand_far_from_object),
-    "success_update": TerminationTermCfg(func=mdp.update_success_state),
+    "success_update": TerminationTermCfg(
+      func=mdp.update_success_state,
+      params={"tolerance": success_tolerance},
+    ),
     "max_successes": TerminationTermCfg(
       func=mdp.max_consecutive_successes_reached,
       params={"max_consecutive_successes": 50},
