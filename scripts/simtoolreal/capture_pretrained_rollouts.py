@@ -177,6 +177,15 @@ def parse_args() -> argparse.Namespace:
     ),
   )
   parser.add_argument(
+    "--round-handle-geom",
+    choices=("capsule", "cylinder"),
+    default="capsule",
+    help=(
+      "Geometry used for sampled 2D round handles. IsaacGym used "
+      "replace_cylinder_with_capsule=True, so capsule is the default."
+    ),
+  )
+  parser.add_argument(
     "--capture-all-envs",
     action="store_true",
     help="Write one HTML trajectory for every parallel env.",
@@ -186,6 +195,23 @@ def parse_args() -> argparse.Namespace:
     type=float,
     default=0.01,
     help="Success tolerance before keypointScale; pretrained eval defaults to 0.01.",
+  )
+  parser.add_argument(
+    "--physics-timestep",
+    type=float,
+    default=None,
+    help="Optional MuJoCo physics timestep override for capture/eval experiments.",
+  )
+  parser.add_argument(
+    "--decimation",
+    type=int,
+    default=None,
+    help="Optional policy decimation override. Use timestep*decimation=1/60.",
+  )
+  parser.add_argument(
+    "--allow-policy-dt-mismatch",
+    action="store_true",
+    help="Allow timestep*decimation to differ from 1/60 for browser-timing tests.",
   )
   parser.add_argument(
     "--output-dir",
@@ -226,6 +252,7 @@ def _sample_distribution_mesh_variants(
   num_envs: int,
   seed: int,
   rollout_idx: int,
+  round_handle_geom: str,
 ) -> tuple[str, ...]:
   distributions = _select_object_distributions(distribution_types)
   rng = np.random.default_rng(seed)
@@ -246,7 +273,7 @@ def _sample_distribution_mesh_variants(
         sampled_handle[1],
         sampled_handle[1],
       )
-      shape = "cylinder"
+      shape = round_handle_geom
     else:
       handle_lengths = (
         sampled_handle[0],
@@ -272,7 +299,7 @@ def _sample_distribution_mesh_variants(
     )
     name = (
       f"sampled_rollout{rollout_idx}_env{env_idx}_{dist.type}_"
-      f"{'cylinder' if shape == 'cylinder' else 'cuboid'}"
+      f"{'round' if shape in ('capsule', 'cylinder') else 'cuboid'}"
     )
     names.append(
       register_object_mesh_variant(
@@ -301,6 +328,9 @@ def _make_env(
   object_mesh_variants: bool,
   success_tolerance: float,
   object_mesh_variant_names: tuple[str, ...] | None,
+  physics_timestep: float | None,
+  decimation: int | None,
+  allow_policy_dt_mismatch: bool,
 ) -> SimToolRealViewerCaptureWrapper:
   env_cfg = (
     make_simtoolreal_env_cfg(
@@ -315,6 +345,19 @@ def _make_env(
   if not object_mesh_variants:
     env_cfg.rewards["success"].params["tolerance"] = success_tolerance
     env_cfg.terminations["success_update"].params["tolerance"] = success_tolerance
+  if physics_timestep is not None:
+    env_cfg.sim.mujoco.timestep = physics_timestep
+  if decimation is not None:
+    env_cfg.decimation = decimation
+  if (
+    not allow_policy_dt_mismatch
+    and abs(env_cfg.sim.mujoco.timestep * env_cfg.decimation - 1.0 / 60.0) > 1.0e-8
+  ):
+    raise ValueError(
+      "Expected physics timestep * decimation to equal the 60 Hz policy dt, got "
+      f"{env_cfg.sim.mujoco.timestep} * {env_cfg.decimation} = "
+      f"{env_cfg.sim.mujoco.timestep * env_cfg.decimation}"
+    )
   env_cfg.scene.num_envs = num_envs
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=None)
   return SimToolRealViewerCaptureWrapper(
@@ -488,6 +531,7 @@ def _run_one(
       num_envs=args.num_envs,
       seed=args.seed + rollout_idx,
       rollout_idx=rollout_idx,
+      round_handle_geom=args.round_handle_geom,
     )
   env = _make_env(
     args.device,
@@ -497,6 +541,9 @@ def _run_one(
     object_mesh_variants,
     args.success_tolerance,
     object_mesh_variant_names,
+    args.physics_timestep,
+    args.decimation,
+    args.allow_policy_dt_mismatch,
   )
   try:
     obs, _ = env.reset(seed=args.seed + rollout_idx)

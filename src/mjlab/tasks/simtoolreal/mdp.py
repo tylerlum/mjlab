@@ -896,12 +896,16 @@ def randomize_handle_head_equivalent_size(
   "geom_pos",
   "geom_rbound",
   "geom_aabb",
+  "body_mass",
+  "body_ipos",
+  "body_inertia",
   recompute=RecomputeLevel.set_const,
 )
 def set_handle_head_mesh_variant_state(
   env: ManagerBasedRlEnv,
   env_ids: torch.Tensor | None,
   goal_asset_cfg: SceneEntityCfg = GOAL_GEOM_CFG,
+  body_cfg: SceneEntityCfg = OBJECT_BODY_CFG,
 ) -> None:
   """Mirror fixed mesh-variant object dimensions into MDP state and goal geoms."""
   if env_ids is None:
@@ -916,7 +920,6 @@ def set_handle_head_mesh_variant_state(
   obj = _object(env)
   handle_lengths = torch.zeros((len(env_ids), 3), device=env.device)
   head_lengths = torch.zeros((len(env_ids), 3), device=env.device)
-  masses = torch.zeros(len(env_ids), device=env.device)
   handle_is_cylinder = torch.zeros(len(env_ids), device=env.device, dtype=torch.bool)
   selected = variant_ids[env_ids]
   handle_densities = torch.zeros(len(env_ids), device=env.device)
@@ -933,14 +936,13 @@ def set_handle_head_mesh_variant_state(
       continue
     handle_lengths[mask] = torch.tensor(handle, device=env.device)
     head_lengths[mask] = torch.tensor(head, device=env.device)
-    handle_is_cylinder[mask] = shape == "cylinder"
+    handle_is_cylinder[mask] = shape in ("cylinder", "capsule")
     handle_densities[mask] = handle_density
     head_densities[mask] = head_density
   handle_mass, _ = _handle_mass_inertia(
     handle_lengths, handle_densities, handle_is_cylinder
   )
   head_mass, _ = _box_mass_inertia(head_lengths, head_densities)
-  masses = handle_mass + head_mass
 
   min_geom_size = torch.full_like(head_lengths, 1.0e-4)
   head_geom_lengths = torch.where(head_lengths > 0.0, head_lengths, min_geom_size)
@@ -961,11 +963,38 @@ def set_handle_head_mesh_variant_state(
 
   _recompute_geom_bounds(env, env_ids=env_ids, asset_cfg=goal_asset_cfg)
 
+  body_ids = obj.indexing.body_ids[body_cfg.body_ids]
+  handle_mass, handle_inertia = _handle_mass_inertia(
+    handle_lengths, handle_densities, handle_is_cylinder
+  )
+  head_mass, head_inertia_local = _box_mass_inertia(head_lengths, head_densities)
+  mass = (handle_mass + head_mass).clamp_min(1.0e-6)
+  com_x = (handle_mass * handle_centers[:, 0] + head_mass * head_centers[:, 0]) / mass
+  handle_dx = handle_centers[:, 0] - com_x
+  head_dx = head_centers[:, 0] - com_x
+  handle_inertia = handle_inertia + torch.stack(
+    [
+      torch.zeros_like(handle_dx),
+      handle_mass * handle_dx**2,
+      handle_mass * handle_dx**2,
+    ],
+    dim=-1,
+  )
+  head_inertia = head_inertia_local + torch.stack(
+    [torch.zeros_like(head_dx), head_mass * head_dx**2, head_mass * head_dx**2],
+    dim=-1,
+  )
+  inertia = (handle_inertia + head_inertia).clamp_min(1.0e-8)
+  env.sim.model.body_mass[env_ids[:, None], body_ids] = mass[:, None]
+  env.sim.model.body_ipos[env_ids[:, None], body_ids, :] = 0.0
+  env.sim.model.body_ipos[env_ids[:, None], body_ids, 0] = com_x[:, None]
+  env.sim.model.body_inertia[env_ids[:, None], body_ids] = inertia[:, None, :]
+
   state["handle_lengths"][env_ids] = handle_lengths
   state["head_lengths"][env_ids] = head_lengths
   state["handle_is_cylinder"][env_ids] = handle_is_cylinder
   state["object_scales"][env_ids] = handle_lengths / OBJECT_BASE_SIZE
-  state["object_masses"][env_ids] = masses
+  state["object_masses"][env_ids] = mass
 
 
 def randomize_handle_head_size(

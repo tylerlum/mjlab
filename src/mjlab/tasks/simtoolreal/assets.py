@@ -127,7 +127,19 @@ SIMPLE_MESH_OBJECT_VARIANTS = (
     0.0,
   ),
 )
-ALL_MESH_OBJECT_VARIANTS = MESH_OBJECT_VARIANTS + SIMPLE_MESH_OBJECT_VARIANTS
+WEBSITE_DEMO_OBJECT_VARIANTS = (
+  (
+    "website_demo",
+    "website_box_capsule_head",
+    (0.200, 0.030, 0.020),
+    (0.040, 0.100, 0.040),
+    400.0,
+    300.0,
+  ),
+)
+ALL_MESH_OBJECT_VARIANTS = (
+  MESH_OBJECT_VARIANTS + SIMPLE_MESH_OBJECT_VARIANTS + WEBSITE_DEMO_OBJECT_VARIANTS
+)
 ObjectMeshVariant = tuple[
   str,
   str,
@@ -151,7 +163,7 @@ def register_object_mesh_variant(
   head_density: float,
 ) -> str:
   """Register a runtime object mesh variant for eval/capture jobs."""
-  if shape not in ("box", "cylinder"):
+  if shape not in ("box", "cylinder", "capsule", "website_box_capsule_head"):
     raise ValueError(f"Unsupported mesh variant shape: {shape}")
   MESH_OBJECT_VARIANT_BY_NAME[name] = (
     name,
@@ -443,20 +455,20 @@ def get_object_spec(
   body = spec.worldbody.add_body(name="object")
   body.add_freejoint(name="object_free_joint")
   handle_type = (
-    mujoco.mjtGeom.mjGEOM_CYLINDER
+    mujoco.mjtGeom.mjGEOM_CAPSULE
     if handle_shape == "cylinder"
     else mujoco.mjtGeom.mjGEOM_BOX
   )
   handle_size = (
-    (handle_half_size[1], handle_half_size[0], 0.0)
-    if handle_shape == "cylinder"
-    else handle_half_size
+    (handle_half_size[1], 0.0, 0.0) if handle_shape == "cylinder" else handle_half_size
   )
   body.add_geom(
     name="object_handle_geom",
     type=handle_type,
     pos=(0.0, 0.0, 0.0),
-    quat=CYLINDER_X_QUAT if handle_shape == "cylinder" else (1.0, 0.0, 0.0, 0.0),
+    fromto=(-handle_half_size[0], 0.0, 0.0, handle_half_size[0], 0.0, 0.0)
+    if handle_shape == "cylinder"
+    else None,
     size=handle_size,
     mass=0.75 * mass,
     rgba=(0.45, 0.45, 0.45, 1.0),
@@ -496,6 +508,43 @@ def _cylinder_x_mesh(length: float, diameter: float) -> trimesh.Trimesh:
   return mesh
 
 
+def _capsule_x_mesh(length: float, diameter: float) -> trimesh.Trimesh:
+  mesh = trimesh.creation.capsule(
+    radius=0.5 * diameter,
+    height=length,
+    count=(16, 32),
+  )
+  transform = trimesh.transformations.rotation_matrix(np.pi / 2.0, [0.0, 1.0, 0.0])
+  mesh.apply_transform(transform)
+  return mesh
+
+
+def get_website_demo_object_spec() -> mujoco.MjSpec:
+  spec = mujoco.MjSpec()
+  body = spec.worldbody.add_body(name="object")
+  body.add_freejoint(name="object_free_joint")
+  body.add_geom(
+    name="object_handle_geom",
+    type=mujoco.mjtGeom.mjGEOM_BOX,
+    size=(0.10, 0.015, 0.01),
+    density=400.0,
+    rgba=(0.45, 0.45, 0.45, 1.0),
+    friction=DEFAULT_GEOM_FRICTION,
+    condim=6,
+  )
+  body.add_geom(
+    name="object_head_geom",
+    type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+    fromto=(0.10, -0.03, 0.0, 0.10, 0.03, 0.0),
+    size=(0.02, 0.0, 0.0),
+    density=300.0,
+    rgba=(0.45, 0.45, 0.45, 1.0),
+    friction=DEFAULT_GEOM_FRICTION,
+    condim=6,
+  )
+  return spec
+
+
 def get_object_mesh_variant_spec(
   handle_shape: str,
   handle_lengths: tuple[float, float, float],
@@ -503,15 +552,19 @@ def get_object_mesh_variant_spec(
   handle_density: float,
   head_density: float,
 ) -> mujoco.MjSpec:
+  if handle_shape == "website_box_capsule_head":
+    return get_website_demo_object_spec()
+
   spec = mujoco.MjSpec()
   has_head = head_lengths[0] > 1.0e-5
   head_center_x = 0.5 * handle_lengths[0] + 0.5 * max(head_lengths[0], 1.0e-4)
 
-  handle_mesh = (
-    _cylinder_x_mesh(handle_lengths[0], handle_lengths[1])
-    if handle_shape == "cylinder"
-    else _box_mesh(handle_lengths)
-  )
+  if handle_shape == "capsule":
+    handle_mesh = _capsule_x_mesh(handle_lengths[0], handle_lengths[1])
+  elif handle_shape == "cylinder":
+    handle_mesh = _cylinder_x_mesh(handle_lengths[0], handle_lengths[1])
+  else:
+    handle_mesh = _box_mesh(handle_lengths)
   _trimesh_to_mujoco_mesh(spec, "handle_mesh", handle_mesh)
   _trimesh_to_mujoco_mesh(
     spec, "head_mesh", _box_mesh(tuple(max(v, 1.0e-4) for v in head_lengths))
@@ -601,20 +654,20 @@ def get_goal_spec(
   spec = mujoco.MjSpec()
   body = spec.worldbody.add_body(name="goal_object", mocap=True)
   handle_type = (
-    mujoco.mjtGeom.mjGEOM_CYLINDER
+    mujoco.mjtGeom.mjGEOM_CAPSULE
     if handle_shape == "cylinder"
     else mujoco.mjtGeom.mjGEOM_BOX
   )
   handle_size = (
-    (handle_half_size[1], handle_half_size[0], 0.0)
-    if handle_shape == "cylinder"
-    else handle_half_size
+    (handle_half_size[1], 0.0, 0.0) if handle_shape == "cylinder" else handle_half_size
   )
   body.add_geom(
     name="goal_handle_geom",
     type=handle_type,
     pos=(0.0, 0.0, 0.0),
-    quat=CYLINDER_X_QUAT if handle_shape == "cylinder" else (1.0, 0.0, 0.0, 0.0),
+    fromto=(-handle_half_size[0], 0.0, 0.0, handle_half_size[0], 0.0, 0.0)
+    if handle_shape == "cylinder"
+    else None,
     size=handle_size,
     rgba=(0.1, 0.8, 0.2, 0.35),
     contype=0,
