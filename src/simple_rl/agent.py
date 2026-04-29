@@ -58,6 +58,19 @@ from simple_rl.utils.sapg_utils import filter_leader, shuffle_batch
 BUG_FROM_EPO_REPO_KEEP_FINISHED_AGENTS_AFTER_REPLACEMENT = False
 
 
+def _flatten_dict(
+    data: Dict[str, Any], prefix: str = "", separator: str = "/"
+) -> Dict[str, Any]:
+    flat: Dict[str, Any] = {}
+    for key, value in data.items():
+        name = f"{prefix}{separator}{key}" if prefix else str(key)
+        if isinstance(value, dict):
+            flat.update(_flatten_dict(value, prefix=name, separator=separator))
+        else:
+            flat[name] = value
+    return flat
+
+
 @dataclass
 class SapgConfig:
     """Configuration for SAPG (Split and Aggregate Policy Gradients).
@@ -1226,13 +1239,12 @@ class Agent:
                     self._ep_cumulative[key][idx] = 0.0
 
         # 2. Flatten all scalar extras → _direct_info (overwrites each step, same as rl_games)
-        from isaacgymenvs.utils.utils import flatten_dict
         # Tensor keys whose per-env values are handled by AverageMeter or step-3 below
         _SKIP = {
             "successes", "closest_keypoint_max_dist", "true_objective",
             "time_outs", "episode_cumulative", "rewards_episode",
         }
-        infos_flat = flatten_dict(infos, prefix="", separator="/")
+        infos_flat = _flatten_dict(infos, prefix="", separator="/")
         self._direct_info = {}
         for k, v in infos_flat.items():
             if k.split("/")[0] in _SKIP:
@@ -1774,7 +1786,7 @@ class Agent:
         kls = []
         csigmas = []  # EPO: track mean action sigma per update
 
-        for mini_ep in range(0, self.cfg.mini_epochs):
+        for _mini_ep in range(0, self.cfg.mini_epochs):
             ep_kls = []
             for i in range(len(self.dataset)):
                 a_loss, c_loss, entropy, kl, current_lr, lr_mul, cmu, csigma, b_loss = (
@@ -2080,7 +2092,7 @@ class Agent:
         for n in range(self.cfg.horizon_length):
             if self.is_rnn:
                 if n % self.cfg.seq_length == 0:
-                    for s, mb_s in zip(self.rnn_states, mb_rnn_states):
+                    for s, mb_s in zip(self.rnn_states, mb_rnn_states, strict=False):
                         mb_s[n // self.cfg.seq_length, :, :, :] = s
 
                 for i, s in enumerate(self.rnn_states):

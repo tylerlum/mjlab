@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import contextlib
 import io
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 with contextlib.redirect_stderr(io.StringIO()):
   import gym
@@ -82,6 +82,62 @@ def _gym_box(shape: tuple[int, ...], low: float, high: float) -> gym.spaces.Box:
   )
 
 
+def _unwrap_env(env: Any) -> ManagerBasedRlEnv:
+  while hasattr(env, "env"):
+    next_env = env.env
+    if next_env is env or not hasattr(next_env, "step"):
+      break
+    env = next_env
+  return env
+
+
+def _finite_progress(value: torch.Tensor, fallback: torch.Tensor) -> torch.Tensor:
+  return torch.where(torch.isinf(value), fallback, value)
+
+
+def _simtoolreal_infos(
+  env: Any,
+  extras: dict,
+  rew: torch.Tensor,
+  truncated: torch.Tensor,
+) -> dict:
+  """Build the SimToolReal info keys expected by the copied trainer code."""
+  from mjlab.tasks.simtoolreal import mdp
+
+  infos = dict(extras)
+  base_env = _unwrap_env(env)
+  state = mdp._state(base_env)
+  kin = mdp._simtoolreal_kinematics(base_env, use_object_state_delay_noise=False)
+  closest_keypoint = _finite_progress(
+    state["closest_keypoint_max_dist_fixed_size"], kin["keypoint_max_dist_fixed"]
+  )
+  closest_fingertip = _finite_progress(
+    state["closest_fingertip_dist"], kin["fingertip_dist"]
+  )
+
+  reward_terms = {}
+  if hasattr(base_env.reward_manager, "active_terms"):
+    for idx, name in enumerate(base_env.reward_manager.active_terms):
+      reward_terms[name] = base_env.reward_manager._step_reward[:, idx].detach().clone()
+
+  infos.update(
+    {
+      "time_outs": truncated,
+      "successes": state["successes"].detach().clone(),
+      "true_objective": state["successes"].detach().clone(),
+      "closest_keypoint_max_dist": closest_keypoint.detach().clone(),
+      "closest_fingertip_dist": closest_fingertip.detach().clone(),
+      "keypoint_max_dist": kin["keypoint_max_dist_fixed"].detach().clone(),
+      "near_goal": state["near_goal"].float().detach().clone(),
+      "near_goal_steps": state["near_goal_steps"].detach().clone(),
+      "lifted_object": state["lifted_object"].float().detach().clone(),
+      "reward": rew.detach().clone(),
+      "episode_cumulative": {"reward": rew.detach().clone(), **reward_terms},
+    }
+  )
+  return infos
+
+
 class MjlabSimpleRlWrapper:
   """Expose a manager-based MJLab env through simple_rl's VecTask-like API."""
 
@@ -116,8 +172,7 @@ class MjlabSimpleRlWrapper:
     self, actions: torch.Tensor
   ) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor, dict]:
     obs, rew, terminated, truncated, extras = self.env.step(actions.to(self.env.device))
-    infos = dict(extras)
-    infos["time_outs"] = truncated
+    infos = _simtoolreal_infos(self.env, extras, rew, truncated)
     return self._obs_dict(obs), rew, terminated | truncated, infos
 
   def set_train_info(self, env_frames: int, *args, **kwargs) -> None:
@@ -172,8 +227,7 @@ class MjlabRlGamesVecEnv:
     obs, rew, terminated, truncated, extras = self.unwrapped.step(
       actions.to(self.unwrapped.device)
     )
-    infos = dict(extras)
-    infos["time_outs"] = truncated
+    infos = _simtoolreal_infos(self.unwrapped, extras, rew, truncated)
     return self._obs_dict(obs), rew, terminated | truncated, infos
 
   def get_env_info(self) -> dict:
@@ -389,6 +443,7 @@ def make_rl_games_config(
       "network": network,
       "config": {
         "name": f"simtoolreal_mjlab_{cfg.algorithm}",
+        "train_dir": str(cfg.experiment_dir / "rl_games"),
         "device_name": device,
         "device": device,
         "env_name": "mjlab",

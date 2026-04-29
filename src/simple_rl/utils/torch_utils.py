@@ -82,7 +82,9 @@ def safe_load(filename: Path) -> Any:
     # Callers that need flexibility should pass map_location themselves.
     from functools import partial
 
-    load_fn = partial(torch.load, map_location=torch.device("cuda"))
+    load_fn = partial(
+        torch.load, map_location=torch.device("cuda"), weights_only=False
+    )
     return safe_filesystem_op(load_fn, filename)
 
 

@@ -38,7 +38,7 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       "object_state_xyz_noise_std": 0.0 if play else 0.01,
       "object_state_rotation_noise_degrees": 0.0 if play else 5.0,
       "object_scale_noise_multiplier_range": (1.0, 1.0),
-      "joint_velocity_obs_noise_std": 0.0 if play else 0.1,
+      "joint_velocity_obs_noise_std": 0.0 if play else 0.01,
     },
     clip=(-10.0, 10.0),
     delay_min_lag=0,
@@ -103,6 +103,11 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     "reset_goal": EventTermCfg(
       func=mdp.reset_goal_uniform,
       mode="reset",
+      params={
+        "x_range": (-0.35, 0.35),
+        "y_range": (-0.1, 0.2),
+        "z_range": (0.68, 1.05),
+      },
     ),
     "reset_task_state": EventTermCfg(
       func=mdp.reset_simtoolreal_state,
@@ -117,10 +122,10 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       mode="step",
       params={
         "asset_cfg": SceneEntityCfg("object", body_names=("object",)),
-        "force_scale": 0.0 if play else 20.0,
-        "torque_scale": 0.0 if play else 2.0,
-        "force_decay": 0.0,
-        "torque_decay": 0.0,
+        "force_scale": 0.0 if play else 2.0,
+        "torque_scale": 0.0,
+        "force_decay": 0.99,
+        "torque_decay": 0.99,
         "force_decay_interval": 0.08,
         "torque_decay_interval": 0.08,
         "lin_vel_impulse_scale": 0.0,
@@ -148,6 +153,7 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     "time_out": TerminationTermCfg(func=time_out, time_out=True),
     "object_fell": TerminationTermCfg(func=mdp.object_fell),
     "hand_far_from_object": TerminationTermCfg(func=mdp.hand_far_from_object),
+    "success_update": TerminationTermCfg(func=mdp.update_success_state),
     "max_successes": TerminationTermCfg(
       func=mdp.max_consecutive_successes_reached,
       params={"max_consecutive_successes": 50},

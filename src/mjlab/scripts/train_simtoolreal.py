@@ -158,6 +158,7 @@ def _run_simple_rl(cfg: SimToolRealTrainCli) -> None:
 
 
 def _run_rl_games(cfg: SimToolRealTrainCli) -> None:
+  from rl_games.common import env_configurations, vecenv
   from rl_games.torch_runner import Runner
 
   alt = cfg.alt
@@ -165,10 +166,14 @@ def _run_rl_games(cfg: SimToolRealTrainCli) -> None:
   _maybe_start_wandb(cfg)
   env = _make_env(cfg)
   vec_env = MjlabRlGamesVecEnv(env)
+  env_configurations.register(
+    "mjlab",
+    {"env_creator": lambda **kwargs: vec_env, "vecenv_type": "MJLAB"},
+  )
+  vecenv.register("MJLAB", lambda config_name, num_actors, **kwargs: vec_env)
   runner_cfg = make_rl_games_config(alt, num_envs=env.num_envs, device=cfg.device)
   runner = Runner()
   runner.load(runner_cfg)
-  runner.params["config"]["vec_env"] = vec_env
   try:
     runner.run({"train": True, "play": False, "checkpoint": None, "sigma": None})
   finally:

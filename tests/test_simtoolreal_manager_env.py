@@ -71,6 +71,12 @@ def test_simtoolreal_training_cfg_matches_source_cadence_and_randomization() -> 
   assert cfg.decimation == 2
   assert cfg.episode_length_s == pytest.approx(10.0)
   assert cfg.observations["actor"].terms["simtoolreal"].delay_max_lag == 3
+  assert (
+    cfg.observations["actor"]
+    .terms["simtoolreal"]
+    .params["joint_velocity_obs_noise_std"]
+    == pytest.approx(0.01)
+  )
   assert cfg.actions["joint_pos"].use_action_delay
   assert cfg.actions["joint_pos"].action_delay_max == 3
   assert cfg.events["randomize_object_size"].func is mdp.randomize_handle_head_equivalent_size
@@ -80,6 +86,11 @@ def test_simtoolreal_training_cfg_matches_source_cadence_and_randomization() -> 
   assert cfg.events["reset_robot_joints"].func is mdp.reset_robot_joints_simtoolreal
   assert cfg.events["reset_successful_goals"].func is mdp.reset_successful_goals
   assert cfg.events["random_object_perturbations"].func is mdp.apply_random_object_perturbations
+  assert cfg.events["random_object_perturbations"].params["force_scale"] == pytest.approx(2.0)
+  assert cfg.events["random_object_perturbations"].params["torque_scale"] == pytest.approx(0.0)
+  assert cfg.events["random_object_perturbations"].params["force_decay"] == pytest.approx(0.99)
+  assert cfg.events["reset_goal"].params["y_range"] == pytest.approx((-0.1, 0.2))
+  assert cfg.events["reset_goal"].params["z_range"] == pytest.approx((0.68, 1.05))
   assert "goal_reached" not in cfg.terminations
   assert cfg.terminations["max_successes"].func is mdp.max_consecutive_successes_reached
   assert "fingertip_delta" in cfg.rewards

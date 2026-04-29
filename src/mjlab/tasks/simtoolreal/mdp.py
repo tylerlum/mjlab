@@ -171,6 +171,7 @@ def _state(env: ManagerBasedRlEnv) -> dict[str, torch.Tensor]:
         (env.num_envs, len(FINGERTIP_BODIES)), float("inf"), device=env.device
       ),
       "furthest_hand_dist": torch.zeros(env.num_envs, device=env.device),
+      "near_goal": torch.zeros(env.num_envs, device=env.device, dtype=torch.bool),
       "near_goal_steps": torch.zeros(env.num_envs, device=env.device),
       "reset_goal_buf": torch.zeros(env.num_envs, device=env.device, dtype=torch.bool),
       "successes": torch.zeros(env.num_envs, device=env.device),
@@ -316,6 +317,12 @@ class SimToolRealJointPositionAction(ActionTerm):
 
   def process_actions(self, actions: torch.Tensor) -> None:
     self._raw_actions[:] = torch.clamp(actions.to(self.device), -1.0, 1.0)
+    state = _state(self._env)
+    episode_start = (self._env.episode_length_buf == 0) & (state["successes"] == 0)
+    if episode_start.any():
+      self._action_queue[episode_start] = self._raw_actions[episode_start].unsqueeze(
+        1
+      )
     _update_queue(self._action_queue, self._raw_actions)
     if self.cfg.use_action_delay and self.cfg.action_delay_max > 1:
       delay_ids = torch.randint(
@@ -376,12 +383,11 @@ def reset_simtoolreal_state(
   if env_ids is None:
     env_ids = torch.arange(env.num_envs, device=env.device)
   state = _state(env)
-  object_entity = _object(env)
-  object_pose = object_entity.data.root_link_pose_w
   state["closest_keypoint_max_dist"][env_ids] = float("inf")
   state["closest_keypoint_max_dist_fixed_size"][env_ids] = float("inf")
   state["closest_fingertip_dist"][env_ids] = float("inf")
   state["furthest_hand_dist"][env_ids] = 0.0
+  state["near_goal"][env_ids] = False
   state["near_goal_steps"][env_ids] = 0.0
   state["reset_goal_buf"][env_ids] = False
   state["prev_episode_successes"][env_ids] = state["successes"][env_ids]
@@ -398,16 +404,7 @@ def reset_simtoolreal_state(
   state["random_ang_vel_impulse_prob"][env_ids] = _log_uniform(
     env, 0.001, 0.1, (len(env_ids),)
   )
-  if state["object_state_queue"] is not None:
-    pose_vel = torch.cat(
-      [
-        object_pose[env_ids, :7],
-        object_entity.data.root_link_lin_vel_w[env_ids],
-        object_entity.data.root_link_ang_vel_w[env_ids],
-      ],
-      dim=-1,
-    )
-    state["object_state_queue"][env_ids] = pose_vel[:, None, :]
+  state["object_state_queue"] = None
 
 
 @requires_model_fields("body_pos", recompute=RecomputeLevel.set_const_0)
@@ -512,8 +509,8 @@ def reset_goal_uniform(
   env: ManagerBasedRlEnv,
   env_ids: torch.Tensor | None,
   x_range: tuple[float, float] = (-0.35, 0.35),
-  y_range: tuple[float, float] = (-0.2, 0.2),
-  z_range: tuple[float, float] = (0.6, 0.95),
+  y_range: tuple[float, float] = (-0.1, 0.2),
+  z_range: tuple[float, float] = (0.68, 1.05),
   is_first_goal: bool = True,
   goal_sampling_type: str = "delta",
   delta_goal_distance: float = 0.1,
@@ -1055,14 +1052,26 @@ def success_bonus(
   steps: int = 10,
   reach_goal_bonus: float = 1000.0,
 ) -> torch.Tensor:
+  state = _state(env)
+  del tolerance, keypoint_scale
+  return state["near_goal"].float() * (reach_goal_bonus / steps)
+
+
+def update_success_state(
+  env: ManagerBasedRlEnv,
+  tolerance: float = 0.075,
+  keypoint_scale: float = 1.5,
+  steps: int = 10,
+) -> torch.Tensor:
   kin = _simtoolreal_kinematics(env, use_object_state_delay_noise=False)
   state = _state(env)
   near = kin["keypoint_max_dist_fixed"] <= tolerance * keypoint_scale
+  state["near_goal"] = near
   state["near_goal_steps"] += near.float()
   is_success = state["near_goal_steps"] >= steps
   state["successes"] += is_success.float()
   state["reset_goal_buf"] |= is_success
-  return near.float() * (reach_goal_bonus / steps)
+  return torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
 
 
 def reset_successful_goals(
@@ -1081,9 +1090,11 @@ def reset_successful_goals(
     return
   reset_goal_uniform(env, reset_goal_env_ids, is_first_goal=False)
   state["reset_goal_buf"][reset_goal_env_ids] = False
+  state["near_goal"][reset_goal_env_ids] = False
   state["near_goal_steps"][reset_goal_env_ids] = 0.0
   state["closest_keypoint_max_dist"][reset_goal_env_ids] = float("inf")
   state["closest_keypoint_max_dist_fixed_size"][reset_goal_env_ids] = float("inf")
+  state["closest_fingertip_dist"][reset_goal_env_ids] = float("inf")
   env.episode_length_buf[reset_goal_env_ids] = 0
   env.scene.write_data_to_sim()
   env.sim.forward()
