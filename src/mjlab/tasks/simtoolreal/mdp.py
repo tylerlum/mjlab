@@ -12,7 +12,7 @@ from mjlab.envs.mdp import dr
 from mjlab.managers.action_manager import ActionTerm, ActionTermCfg
 from mjlab.managers.event_manager import RecomputeLevel, requires_model_fields
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.tasks.simtoolreal.assets import JOINT_NAMES
+from mjlab.tasks.simtoolreal.assets import JOINT_NAMES, MESH_OBJECT_VARIANTS
 from mjlab.utils.lab_api.math import quat_apply, quat_from_euler_xyz
 
 if TYPE_CHECKING:
@@ -161,6 +161,9 @@ def _state(env: ManagerBasedRlEnv) -> dict[str, torch.Tensor]:
       "head_lengths": torch.tensor(
         [0.05, 0.05, 0.03], device=env.device, dtype=torch.float32
       ).repeat(env.num_envs, 1),
+      "handle_is_cylinder": torch.zeros(
+        env.num_envs, device=env.device, dtype=torch.bool
+      ),
       "closest_keypoint_max_dist": torch.full(
         (env.num_envs,), float("inf"), device=env.device
       ),
@@ -559,6 +562,7 @@ def sample_handle_head_properties(
   head_lengths = torch.zeros((n, 3), device=env.device)
   handle_densities = torch.zeros(n, device=env.device)
   head_densities = torch.zeros(n, device=env.device)
+  handle_is_cylinder = torch.zeros(n, device=env.device, dtype=torch.bool)
   choices = torch.randint(0, len(HANDLE_HEAD_DISTRIBUTIONS), (n,), device=env.device)
   for i, (h_min, h_max, head_min, head_max) in enumerate(HANDLE_HEAD_DISTRIBUTIONS):
     mask = choices == i
@@ -572,6 +576,7 @@ def sample_handle_head_properties(
     )
     if handle.shape[1] == 2:
       handle = torch.stack([handle[:, 0], handle[:, 1], handle[:, 1]], dim=-1)
+      handle_is_cylinder[mask] = True
     handle_lengths[mask] = handle
     h_density_min, h_density_max, head_density_min, head_density_max = (
       HANDLE_HEAD_DENSITY_RANGES[i]
@@ -592,6 +597,7 @@ def sample_handle_head_properties(
       head_densities[mask] = torch.empty(count, device=env.device).uniform_(
         head_density_min, head_density_max
       )
+  _state(env)["_last_sampled_handle_is_cylinder"] = handle_is_cylinder
   return handle_lengths, head_lengths, handle_densities, head_densities
 
 
@@ -739,8 +745,82 @@ def randomize_handle_head_equivalent_size(
   state = _state(env)
   state["handle_lengths"][env_ids] = handle_lengths
   state["head_lengths"][env_ids] = head_lengths
+  state["handle_is_cylinder"][env_ids] = state[
+    "_last_sampled_handle_is_cylinder"
+  ][: len(env_ids)]
   state["object_scales"][env_ids] = lengths / OBJECT_BASE_SIZE
   state["object_masses"][env_ids] = mass
+
+
+@requires_model_fields(
+  "geom_size",
+  "geom_pos",
+  "geom_rbound",
+  "geom_aabb",
+  recompute=RecomputeLevel.set_const,
+)
+def set_handle_head_mesh_variant_state(
+  env: ManagerBasedRlEnv,
+  env_ids: torch.Tensor | None,
+  goal_asset_cfg: SceneEntityCfg = GOAL_GEOM_CFG,
+) -> None:
+  """Mirror fixed mesh-variant object dimensions into MDP state and goal geoms."""
+  if env_ids is None:
+    env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
+  else:
+    env_ids = env_ids.to(env.device, dtype=torch.int)
+  variant_ids = env.sim.world_to_variant.get("object")
+  if variant_ids is None:
+    raise RuntimeError("Object mesh variants are not enabled for this environment.")
+
+  state = _state(env)
+  handle_lengths = torch.zeros((len(env_ids), 3), device=env.device)
+  head_lengths = torch.zeros((len(env_ids), 3), device=env.device)
+  masses = torch.zeros(len(env_ids), device=env.device)
+  handle_is_cylinder = torch.zeros(len(env_ids), device=env.device, dtype=torch.bool)
+  selected = variant_ids[env_ids]
+  for idx, (_name, shape, handle, head, mass) in enumerate(MESH_OBJECT_VARIANTS):
+    mask = selected == idx
+    if not mask.any():
+      continue
+    handle_lengths[mask] = torch.tensor(handle, device=env.device)
+    head_lengths[mask] = torch.tensor(head, device=env.device)
+    masses[mask] = mass
+    handle_is_cylinder[mask] = shape == "cylinder"
+
+  lengths = torch.stack(
+    [
+      handle_lengths[:, 0] + head_lengths[:, 0],
+      torch.maximum(handle_lengths[:, 1], head_lengths[:, 1]),
+      torch.maximum(handle_lengths[:, 2], head_lengths[:, 2]),
+    ],
+    dim=-1,
+  )
+  min_geom_size = torch.full_like(head_lengths, 1.0e-4)
+  head_geom_lengths = torch.where(head_lengths > 0.0, head_lengths, min_geom_size)
+  handle_centers = torch.zeros_like(handle_lengths)
+  head_centers = torch.zeros_like(head_lengths)
+  handle_centers[:, 0] = -0.5 * lengths[:, 0] + 0.5 * handle_lengths[:, 0]
+  head_centers[:, 0] = 0.5 * lengths[:, 0] - 0.5 * head_geom_lengths[:, 0]
+
+  goal = _goal(env)
+  goal_geom_ids = goal.indexing.geom_ids[goal_asset_cfg.geom_ids]
+  env_grid = env_ids[:, None]
+  env.sim.model.geom_size[env_grid, goal_geom_ids, :3] = 0.5 * torch.stack(
+    [handle_lengths, head_geom_lengths], dim=1
+  )
+  env.sim.model.geom_pos[env_grid, goal_geom_ids, :3] = torch.stack(
+    [handle_centers, head_centers], dim=1
+  )
+  from mjlab.envs.mdp.dr.geom import _recompute_geom_bounds
+
+  _recompute_geom_bounds(env, env_ids=env_ids, asset_cfg=goal_asset_cfg)
+
+  state["handle_lengths"][env_ids] = handle_lengths
+  state["head_lengths"][env_ids] = head_lengths
+  state["handle_is_cylinder"][env_ids] = handle_is_cylinder
+  state["object_scales"][env_ids] = lengths / OBJECT_BASE_SIZE
+  state["object_masses"][env_ids] = masses
 
 
 def randomize_handle_head_size(

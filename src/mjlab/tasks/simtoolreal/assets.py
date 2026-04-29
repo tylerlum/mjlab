@@ -9,9 +9,16 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import mujoco
+import numpy as np
+import trimesh
 
 from mjlab.actuator import BuiltinPositionActuatorCfg
-from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
+from mjlab.entity import (
+  EntityArticulationInfoCfg,
+  EntityCfg,
+  VariantCfg,
+  VariantEntityCfg,
+)
 
 SIMTOOLREAL_ROOT = Path(__file__).resolve().parents[5] / "simtoolreal"
 SIMTOOLREAL_ASSET_ROOT = SIMTOOLREAL_ROOT / "assets/urdf/kuka_sharpa_description"
@@ -67,6 +74,13 @@ DEFAULT_ASSET_FRICTION = 0.5
 FINGERTIP_FRICTION = 1.5
 DEFAULT_GEOM_FRICTION = (DEFAULT_ASSET_FRICTION, 0.005, 0.0001)
 FINGERTIP_GEOM_FRICTION = (FINGERTIP_FRICTION, 0.005, 0.0001)
+CYLINDER_X_QUAT = (0.7071067811865476, 0.0, 0.7071067811865475, 0.0)
+MESH_OBJECT_VARIANTS = (
+  ("cuboid_hammer", "box", (0.165, 0.030, 0.026), (0.085, 0.055, 0.060), 0.075),
+  ("cylinder_hammer", "cylinder", (0.165, 0.030, 0.030), (0.085, 0.055, 0.060), 0.075),
+  ("cuboid_marker", "box", (0.130, 0.035, 0.032), (0.0, 0.0, 0.0), 0.045),
+  ("cylinder_marker", "cylinder", (0.130, 0.028, 0.028), (0.0, 0.0, 0.0), 0.045),
+)
 FINGERTIP_LINK_NAMES = (
   "left_index_DP",
   "left_middle_DP",
@@ -334,15 +348,27 @@ def get_object_spec(
   handle_half_size: tuple[float, float, float] = (0.075, 0.0125, 0.0125),
   head_half_size: tuple[float, float, float] = (0.025, 0.025, 0.015),
   mass: float = 0.08,
+  handle_shape: str = "box",
 ) -> mujoco.MjSpec:
   spec = mujoco.MjSpec()
   body = spec.worldbody.add_body(name="object")
   body.add_freejoint(name="object_free_joint")
+  handle_type = (
+    mujoco.mjtGeom.mjGEOM_CYLINDER
+    if handle_shape == "cylinder"
+    else mujoco.mjtGeom.mjGEOM_BOX
+  )
+  handle_size = (
+    (handle_half_size[1], handle_half_size[0], 0.0)
+    if handle_shape == "cylinder"
+    else handle_half_size
+  )
   body.add_geom(
     name="object_handle_geom",
-    type=mujoco.mjtGeom.mjGEOM_BOX,
+    type=handle_type,
     pos=(-0.025, 0.0, 0.0),
-    size=handle_half_size,
+    quat=CYLINDER_X_QUAT if handle_shape == "cylinder" else (1.0, 0.0, 0.0, 0.0),
+    size=handle_size,
     mass=0.75 * mass,
     rgba=(0.45, 0.45, 0.45, 1.0),
     friction=DEFAULT_GEOM_FRICTION,
@@ -361,6 +387,75 @@ def get_object_spec(
   return spec
 
 
+def _trimesh_to_mujoco_mesh(
+  spec: mujoco.MjSpec, name: str, mesh: trimesh.Trimesh
+) -> None:
+  mj_mesh = spec.add_mesh()
+  mj_mesh.name = name
+  mj_mesh.uservert = np.asarray(mesh.vertices, dtype=np.float64).flatten().tolist()
+  mj_mesh.userface = np.asarray(mesh.faces, dtype=np.int32).flatten().tolist()
+
+
+def _box_mesh(extents: tuple[float, float, float]) -> trimesh.Trimesh:
+  return trimesh.creation.box(extents=extents)
+
+
+def _cylinder_x_mesh(length: float, diameter: float) -> trimesh.Trimesh:
+  mesh = trimesh.creation.cylinder(radius=0.5 * diameter, height=length, sections=32)
+  transform = trimesh.transformations.rotation_matrix(np.pi / 2.0, [0.0, 1.0, 0.0])
+  mesh.apply_transform(transform)
+  return mesh
+
+
+def get_object_mesh_variant_spec(
+  handle_shape: str,
+  handle_lengths: tuple[float, float, float],
+  head_lengths: tuple[float, float, float],
+  mass: float,
+) -> mujoco.MjSpec:
+  spec = mujoco.MjSpec()
+  has_head = head_lengths[0] > 1.0e-5
+  total_x = handle_lengths[0] + max(head_lengths[0], 0.0)
+  handle_center_x = -0.5 * total_x + 0.5 * handle_lengths[0]
+  head_center_x = 0.5 * total_x - 0.5 * max(head_lengths[0], 1.0e-4)
+
+  handle_mesh = (
+    _cylinder_x_mesh(handle_lengths[0], handle_lengths[1])
+    if handle_shape == "cylinder"
+    else _box_mesh(handle_lengths)
+  )
+  _trimesh_to_mujoco_mesh(spec, "handle_mesh", handle_mesh)
+  _trimesh_to_mujoco_mesh(
+    spec, "head_mesh", _box_mesh(tuple(max(v, 1.0e-4) for v in head_lengths))
+  )
+
+  body = spec.worldbody.add_body(name="object")
+  body.add_freejoint(name="object_free_joint")
+  body.add_geom(
+    name="object_handle_geom",
+    type=mujoco.mjtGeom.mjGEOM_MESH,
+    meshname="handle_mesh",
+    pos=(handle_center_x, 0.0, 0.0),
+    mass=0.75 * mass if has_head else mass,
+    rgba=(0.45, 0.45, 0.45, 1.0),
+    friction=DEFAULT_GEOM_FRICTION,
+    condim=6,
+  )
+  body.add_geom(
+    name="object_head_geom",
+    type=mujoco.mjtGeom.mjGEOM_MESH,
+    meshname="head_mesh",
+    pos=(head_center_x, 0.0, 0.0),
+    mass=0.25 * mass if has_head else 1.0e-6,
+    rgba=(0.45, 0.45, 0.45, 1.0),
+    friction=DEFAULT_GEOM_FRICTION,
+    condim=6,
+    contype=1 if has_head else 0,
+    conaffinity=1 if has_head else 0,
+  )
+  return spec
+
+
 def get_object_cfg() -> EntityCfg:
   return EntityCfg(
     spec_fn=get_object_spec,
@@ -372,17 +467,55 @@ def get_object_cfg() -> EntityCfg:
   )
 
 
+def get_object_mesh_variant_cfg() -> VariantEntityCfg:
+  return VariantEntityCfg(
+    variants={
+      name: VariantCfg(
+        spec_fn=(
+          lambda shape=shape, handle=handle, head=head, mass=mass: (
+            get_object_mesh_variant_spec(
+              handle_shape=shape,
+              handle_lengths=handle,
+              head_lengths=head,
+              mass=mass,
+            )
+          )
+        ),
+        weight=1.0,
+      )
+      for name, shape, handle, head, mass in MESH_OBJECT_VARIANTS
+    },
+    init_state=EntityCfg.InitialStateCfg(
+      pos=(0.0, 0.0, 0.63),
+      rot=(1.0, 0.0, 0.0, 0.0),
+      joint_pos={},
+    ),
+  )
+
+
 def get_goal_spec(
   handle_half_size: tuple[float, float, float] = (0.075, 0.0125, 0.0125),
   head_half_size: tuple[float, float, float] = (0.025, 0.025, 0.015),
+  handle_shape: str = "box",
 ) -> mujoco.MjSpec:
   spec = mujoco.MjSpec()
   body = spec.worldbody.add_body(name="goal_object", mocap=True)
+  handle_type = (
+    mujoco.mjtGeom.mjGEOM_CYLINDER
+    if handle_shape == "cylinder"
+    else mujoco.mjtGeom.mjGEOM_BOX
+  )
+  handle_size = (
+    (handle_half_size[1], handle_half_size[0], 0.0)
+    if handle_shape == "cylinder"
+    else handle_half_size
+  )
   body.add_geom(
     name="goal_handle_geom",
-    type=mujoco.mjtGeom.mjGEOM_BOX,
+    type=handle_type,
     pos=(-0.025, 0.0, 0.0),
-    size=handle_half_size,
+    quat=CYLINDER_X_QUAT if handle_shape == "cylinder" else (1.0, 0.0, 0.0, 0.0),
+    size=handle_size,
     rgba=(0.1, 0.8, 0.2, 0.35),
     contype=0,
     conaffinity=0,

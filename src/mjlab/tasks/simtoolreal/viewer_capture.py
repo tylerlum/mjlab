@@ -12,7 +12,7 @@ import torch
 
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.tasks.simtoolreal.assets import JOINT_NAMES, read_robot_urdf_for_viewer
-from mjlab.tasks.simtoolreal.mdp import N_ACT, OBJECT_BASE_SIZE, _state
+from mjlab.tasks.simtoolreal.mdp import N_ACT, _state
 
 
 @dataclass(kw_only=True)
@@ -21,6 +21,7 @@ class SimToolRealViewerCaptureCfg:
   output_dir: Path = Path("videos")
   capture_freq: int = 6000
   capture_len: int = 600
+  env_index: int = 0
   wandb_key: str = "interactive_viewer"
   log_to_wandb: bool = True
 
@@ -84,12 +85,13 @@ class SimToolRealViewerCaptureWrapper:
     obj = self.env.scene["object"]
     goal = self.env.scene["goal"]
     table = self.env.scene["table"]
+    env_index = self.cfg.env_index
     return {
-      "robot_joint_pos": robot.data.joint_pos[0, :N_ACT].detach().cpu().numpy(),
-      "robot_base_pose": self._pose_xyzw(robot.data.root_link_pose_w[0]),
-      "object_pose": self._pose_xyzw(obj.data.root_link_pose_w[0]),
-      "goal_pose": self._pose_xyzw(goal.data.root_link_pose_w[0]),
-      "table_pose": self._pose_xyzw(table.data.root_link_pose_w[0]),
+      "robot_joint_pos": robot.data.joint_pos[env_index, :N_ACT].detach().cpu().numpy(),
+      "robot_base_pose": self._pose_xyzw(robot.data.root_link_pose_w[env_index]),
+      "object_pose": self._pose_xyzw(obj.data.root_link_pose_w[env_index]),
+      "goal_pose": self._pose_xyzw(goal.data.root_link_pose_w[env_index]),
+      "table_pose": self._pose_xyzw(table.data.root_link_pose_w[env_index]),
     }
 
   def _box_urdf(self, name: str, size: tuple[float, float, float]) -> str:
@@ -106,27 +108,54 @@ class SimToolRealViewerCaptureWrapper:
     name: str,
     handle_size: tuple[float, float, float],
     head_size: tuple[float, float, float],
+    handle_is_cylinder: bool = False,
   ) -> str:
     hx, hy, hz = handle_size
     tx, ty, tz = head_size
+    handle_geometry = (
+      f'<cylinder radius="{0.5 * hy}" length="{hx}"/>'
+      if handle_is_cylinder
+      else f'<box size="{hx} {hy} {hz}"/>'
+    )
+    handle_origin = (
+      f'<origin xyz="0 0 0" rpy="0 {np.pi / 2.0} 0"/>'
+      if handle_is_cylinder
+      else '<origin xyz="0 0 0"/>'
+    )
     if tx <= 1.0e-5:
-      return self._box_urdf(name, handle_size)
+      return f"""<robot name="{name}">
+  <link name="{name}">
+    <visual>
+      {handle_origin}
+      <geometry>{handle_geometry}</geometry>
+    </visual>
+    <collision>
+      {handle_origin}
+      <geometry>{handle_geometry}</geometry>
+    </collision>
+  </link>
+</robot>"""
     total_x = hx + tx
     handle_x = -0.5 * total_x + 0.5 * hx
     head_x = 0.5 * total_x - 0.5 * tx
+    handle_origin = (
+      f'<origin xyz="{handle_x} 0 0" rpy="0 {np.pi / 2.0} 0"/>'
+      if handle_is_cylinder
+      else f'<origin xyz="{handle_x} 0 0"/>'
+    )
     return f"""<robot name="{name}">
   <link name="{name}">
     <visual>
-      <origin xyz="{handle_x} 0 0"/>
-      <geometry><box size="{hx} {hy} {hz}"/></geometry>
+      {handle_origin}
+      <geometry>{handle_geometry}</geometry>
     </visual>
     <visual>
       <origin xyz="{head_x} 0 0"/>
       <geometry><box size="{tx} {ty} {tz}"/></geometry>
     </visual>
     <collision>
-      <origin xyz="{handle_x} 0 0"/>
-      <geometry><box size="{hx} {hy} {hz}"/></geometry>
+      {handle_origin}
+      <geometry>{handle_geometry}</geometry>
     </collision>
     <collision>
       <origin xyz="{head_x} 0 0"/>
@@ -143,21 +172,22 @@ class SimToolRealViewerCaptureWrapper:
     )
 
     robot_urdf = read_robot_urdf_for_viewer()
-    object_size = tuple(
-      (OBJECT_BASE_SIZE * _state(self.env)["object_scales"][0]).detach().cpu().tolist()
-    )
     sim_state = _state(self.env)
-    handle_size = tuple(sim_state["handle_lengths"][0].detach().cpu().tolist())
-    head_size = tuple(sim_state["head_lengths"][0].detach().cpu().tolist())
+    env_index = self.cfg.env_index
+    handle_size = tuple(sim_state["handle_lengths"][env_index].detach().cpu().tolist())
+    head_size = tuple(sim_state["head_lengths"][env_index].detach().cpu().tolist())
+    handle_is_cylinder = bool(
+      sim_state["handle_is_cylinder"][env_index].detach().cpu().item()
+    )
     object_urdf = (
-      self._handle_head_urdf("object", handle_size, head_size)
+      self._handle_head_urdf("object", handle_size, head_size, handle_is_cylinder)
       if any(x > 1.0e-5 for x in head_size)
-      else self._box_urdf("object", object_size)
+      else self._handle_head_urdf("object", handle_size, head_size, handle_is_cylinder)
     )
     goal_urdf = (
-      self._handle_head_urdf("goal", handle_size, head_size)
+      self._handle_head_urdf("goal", handle_size, head_size, handle_is_cylinder)
       if any(x > 1.0e-5 for x in head_size)
-      else self._box_urdf("goal", object_size)
+      else self._handle_head_urdf("goal", handle_size, head_size, handle_is_cylinder)
     )
     robots = [
       make_embedded_robot(
@@ -198,7 +228,10 @@ class SimToolRealViewerCaptureWrapper:
       robot_name="robot",
     )
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    path = self.cfg.output_dir / f"{timestamp}_viewer_{self.step_count}.html"
+    path = (
+      self.cfg.output_dir
+      / f"{timestamp}_env{env_index}_viewer_{self.step_count}.html"
+    )
     path.write_text(html, encoding="utf-8")
     if self.cfg.log_to_wandb:
       try:

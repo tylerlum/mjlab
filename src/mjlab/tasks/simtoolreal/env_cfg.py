@@ -16,13 +16,16 @@ from mjlab.tasks.simtoolreal.assets import (
   get_goal_cfg,
   get_iiwa_sharpa_cfg,
   get_object_cfg,
+  get_object_mesh_variant_cfg,
   get_table_cfg,
 )
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.viewer import ViewerConfig
 
 
-def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+def make_simtoolreal_env_cfg(
+  play: bool = False, object_mesh_variants: bool = False
+) -> ManagerBasedRlEnvCfg:
   """Create the SimToolReal KUKA+Sharpa training environment.
 
   This is the manager-based MJLab/Warp port of the IsaacGym MDP, using the source
@@ -71,9 +74,17 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       mode="reset",
     ),
     "randomize_object_size": EventTermCfg(
-      func=mdp.randomize_handle_head_equivalent_size,
+      func=(
+        mdp.set_handle_head_mesh_variant_state
+        if object_mesh_variants
+        else mdp.randomize_handle_head_equivalent_size
+      ),
       mode="reset",
-      params={"asset_cfg": object_geom_cfg, "goal_asset_cfg": goal_geom_cfg},
+      params=(
+        {"goal_asset_cfg": goal_geom_cfg}
+        if object_mesh_variants
+        else {"asset_cfg": object_geom_cfg, "goal_asset_cfg": goal_geom_cfg}
+      ),
     ),
     "reset_object": EventTermCfg(
       func=mdp.reset_object_uniform,
@@ -165,7 +176,9 @@ def make_simtoolreal_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       terrain=TerrainEntityCfg(terrain_type="plane"),
       entities={
         "robot": get_iiwa_sharpa_cfg(),
-        "object": get_object_cfg(),
+        "object": get_object_mesh_variant_cfg()
+        if object_mesh_variants
+        else get_object_cfg(),
         "goal": get_goal_cfg(),
         "table": get_table_cfg(),
       },

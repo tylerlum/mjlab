@@ -8,14 +8,55 @@ Upcoming version (not yet released)
 Added
 ^^^^^
 
+- Added ``--log-root`` CLI option to ``train``, ``play``, and ``evaluate``
+  scripts for choosing where training logs are stored. Defaults to
+  ``logs/rsl_rl`` (unchanged behavior). Useful for directing outputs to a
+  scratch disk or shared mount.
+- ``RewardManager``, ``TerminationManager``, and ``MetricsManager`` now
+  validate that every term function returns a tensor of shape
+  ``(num_envs,)`` when evaluated, raising a clear ``ValueError``
+  naming the offending term instead of silently broadcasting or crashing
+  with an opaque error later during training.
 - Added ``ContactSensor.primary_names`` property to expose the resolved
   primary names in the order they appear along the per-contact axis of the
   output tensors. This makes it possible to map a contact-data column back
   to the primary it belongs to (:issue:`914`).
+- Added per-world mesh variant support via ``VariantEntityCfg`` and
+  ``VariantCfg``. Each world in a batched simulation can now use a
+  different mesh asset for the same logical entity (e.g. world 0 holds a
+  cube, world 1 a sphere), with weights controlling the proportion of
+  worlds assigned to each variant. Mesh-derived constants (collision
+  bounds, body inertials, subtree mass, inverse weights) are compiled
+  per-variant and stored as per-world arrays in the Warp model, so domain
+  randomization, the native viewer, the offscreen renderer, and the Viser
+  viewer all pick up the variant assignment automatically. Variants must
+  share the same kinematic structure (same bodies, joints, joint types);
+  only mesh geoms may differ. Assignment is fixed at simulation init.
+  See :ref:`per_world_mesh` for usage. With help from @XiangruiJiang.
 
 Changed
 ^^^^^^^
 
+- Bumped ``mujoco`` to 3.8 and ``mujoco-warp`` to 3.8.0. The ``multiccd``
+  enable flag was removed in mujoco 3.8 (it became default-on), so configs
+  that listed ``"multiccd"`` in ``MujocoCfg.enableflags`` need to drop it.
+- Camera segmentation now matches ``mujoco_warp``'s typed segmentation
+  output. ``CameraSensorData.segmentation`` stores ``(object_id,
+  object_type)`` pairs in shape ``[B, H, W, 2]`` instead of the previous
+  legacy geom-id-only layout. Contribution by @tkelestemur.
+- Sped up ``RayCaster`` post-processing by removing boolean-mask indexing
+  operations and replacing them with ``masked_fill_`` plus a clamped-distance
+  formulation of ``hit_pos_w`` that places misses at the world origin. This
+  removes all CUDA syncs from the ray post-process, letting the CPU thread
+  proceed while GPU-based sensing runs. Contribution by @bd-pdomanico.
+- Bumped ``rsl-rl-lib`` from 5.0.1 to 5.2.0. This brings ``torch.compile`` support for
+  PPO and Distillation, and optional std clamping and constant std in
+  ``GaussianDistribution``. No code changes required on the mjlab side.
+- ``TerrainEntityCfg`` debug visualization sites (environment origins,
+  terrain origins, flat patches) are now off by default. Set
+  ``debug_vis=True`` to re-enable them. The sites inflated ``nsite`` and
+  caused a measurable slowdown in the per-step ``site_local_to_global``
+  kernel (:issue:`942`).
 - Task package load failures during ``mjlab`` import now print the full
   traceback (and the entry point's module path) to ``stderr`` instead of
   just the exception message, making it easier to pinpoint the source of
@@ -31,6 +72,11 @@ Changed
 Fixed
 ^^^^^
 
+- Fixed ``ManagerBasedRlEnv`` initializing Warp on all visible CUDA devices
+  even when constructed with ``device="cpu"``. ``seed_rng`` now accepts a
+  ``device`` argument and skips ``wp.rand_init`` on CPU devices, so a
+  CPU-only env no longer claims a CUDA context on machines with a visible
+  GPU (:issue:`949`).
 - Fixed ``ContactSensor.compute_first_contact`` and ``compute_first_air``
   occasionally missing events when a contact began or ended right at the
   last physics substep of a control step. ``current_contact_time`` /

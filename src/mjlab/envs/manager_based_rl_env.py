@@ -184,7 +184,7 @@ class ManagerBasedRlEnv:
     # Initialize base environment state.
     self.cfg = cfg
     if self.cfg.seed is not None:
-      self.cfg.seed = self.seed(self.cfg.seed)
+      self.cfg.seed = self.seed(self.cfg.seed, device=device)
     self._sim_step_counter = 0
     self.extras = {}
     self.obs_buf = {}
@@ -194,12 +194,21 @@ class ManagerBasedRlEnv:
 
     # Initialize scene and simulation.
     self.scene = Scene(self.cfg.scene, device=device)
-    self.sim = Simulation(
-      num_envs=self.scene.num_envs,
-      cfg=self.cfg.sim,
-      model=self.scene.compile(),
-      device=device,
-    )
+    if self.scene.has_mesh_variants:
+      self.sim = Simulation(
+        num_envs=self.scene.num_envs,
+        cfg=self.cfg.sim,
+        spec=self.scene.spec,
+        variant_info=self.scene.collect_variant_info(),
+        device=device,
+      )
+    else:
+      self.sim = Simulation(
+        num_envs=self.scene.num_envs,
+        cfg=self.cfg.sim,
+        model=self.scene.compile(),
+        device=device,
+      )
 
     self.scene.initialize(
       mj_model=self.sim.mj_model,
@@ -235,7 +244,11 @@ class ManagerBasedRlEnv:
     self._offline_renderer: OffscreenRenderer | None = None
     if self.render_mode == "rgb_array":
       renderer = OffscreenRenderer(
-        model=self.sim.mj_model, cfg=self.cfg.viewer, scene=self.scene
+        model=self.sim.mj_model,
+        cfg=self.cfg.viewer,
+        scene=self.scene,
+        sim_model=self.sim.model,
+        expanded_fields=self.sim.expanded_fields,
       )
       renderer.initialize()
       self._offline_renderer = renderer
@@ -493,12 +506,11 @@ class ManagerBasedRlEnv:
       self._offline_renderer.close()
     self.recorder_manager.close()
 
-  @staticmethod
-  def seed(seed: int = -1) -> int:
+  def seed(self, seed: int = -1, device: str | torch.device | None = None) -> int:
     if seed == -1:
       seed = np.random.randint(0, 10_000)
     print_info(f"Setting seed: {seed}")
-    random_utils.seed_rng(seed)
+    random_utils.seed_rng(seed, device=device if device is not None else self.device)
     return seed
 
   def update_visualizers(self, visualizer: DebugVisualizer) -> None:

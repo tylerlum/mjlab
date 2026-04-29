@@ -9,6 +9,7 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.tasks.registry import list_tasks, load_env_cfg
 from mjlab.tasks.simtoolreal import mdp
 from mjlab.tasks.simtoolreal.assets import ROBOT_URDF
+from mjlab.tasks.simtoolreal.env_cfg import make_simtoolreal_env_cfg
 from mjlab.tasks.simtoolreal.mdp import N_ACT, N_OBS, N_STATE
 
 TASK_ID = "Mjlab-SimToolReal-Iiwa-Sharpa-SimpleCuboid"
@@ -128,6 +129,38 @@ def test_simtoolreal_object_uses_separate_handle_and_head_geoms() -> None:
     state = mdp._state(env)
     assert torch.all(state["handle_lengths"] > 0.0)
     assert torch.all(state["object_scales"][:, 0] > 0.0)
+  finally:
+    env.close()
+
+
+def test_simtoolreal_mesh_variants_assign_cuboids_and_cylinders() -> None:
+  cfg = make_simtoolreal_env_cfg(play=True, object_mesh_variants=True)
+  cfg.scene.num_envs = 4
+
+  env = ManagerBasedRlEnv(cfg=cfg, device="cpu")
+  try:
+    obs, _ = env.reset(seed=11)
+    state = mdp._state(env)
+
+    assert env.sim.world_to_variant["object"].detach().cpu().tolist() == [0, 1, 2, 3]
+    assert state["handle_is_cylinder"].detach().cpu().tolist() == [
+      False,
+      True,
+      False,
+      True,
+    ]
+    torch.testing.assert_close(
+      state["object_masses"].detach().cpu(),
+      torch.tensor([0.075, 0.075, 0.045, 0.045]),
+    )
+    assert torch.isfinite(obs["actor"]).all()
+
+    action = torch.zeros((env.num_envs, N_ACT), device=env.device)
+    obs, reward, terminated, truncated, _ = env.step(action)
+    assert torch.isfinite(obs["actor"]).all()
+    assert torch.isfinite(reward).all()
+    assert not terminated.any()
+    assert not truncated.any()
   finally:
     env.close()
 
