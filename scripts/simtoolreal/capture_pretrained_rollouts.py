@@ -16,10 +16,18 @@ from omegaconf import OmegaConf
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.tasks.registry import load_env_cfg
 from mjlab.tasks.simtoolreal import N_ACT, N_OBS
-from mjlab.tasks.simtoolreal.assets import JOINT_NAMES, read_robot_urdf_for_viewer
+from mjlab.tasks.simtoolreal.assets import (
+  JOINT_NAMES,
+  read_robot_urdf_for_viewer,
+  register_object_mesh_variant,
+)
 from mjlab.tasks.simtoolreal.env_cfg import make_simtoolreal_env_cfg
 from mjlab.tasks.simtoolreal.interactive_viewer import create_html, make_embedded_robot
 from mjlab.tasks.simtoolreal.mdp import _state
+from mjlab.tasks.simtoolreal.object_size_distributions import (
+  OBJECT_SIZE_DISTRIBUTIONS,
+  ObjectSizeDistribution,
+)
 from mjlab.tasks.simtoolreal.viewer_capture import (
   SimToolRealViewerCaptureCfg,
   SimToolRealViewerCaptureWrapper,
@@ -159,6 +167,16 @@ def parse_args() -> argparse.Namespace:
     help="Optional subset of mesh variant names, e.g. simple_cuboid simple_cylinder.",
   )
   parser.add_argument(
+    "--sample-object-distribution-types",
+    nargs="*",
+    default=None,
+    help=(
+      "Sample one runtime mesh variant per env from these SimToolReal object "
+      "distribution types, e.g. simple_cuboid simple_cylinder. This enables "
+      "true mixed cuboid/cylinder geometry while still randomizing sizes."
+    ),
+  )
+  parser.add_argument(
     "--capture-all-envs",
     action="store_true",
     help="Write one HTML trajectory for every parallel env.",
@@ -180,6 +198,99 @@ def parse_args() -> argparse.Namespace:
     help="Sample actions instead of using deterministic policy means.",
   )
   return parser.parse_args()
+
+
+def _select_object_distributions(
+  distribution_types: tuple[str, ...],
+) -> list[ObjectSizeDistribution]:
+  allowed = set(distribution_types)
+  distributions = [d for d in OBJECT_SIZE_DISTRIBUTIONS if d.type in allowed]
+  if not distributions:
+    raise ValueError(
+      f"No object size distributions matched {sorted(allowed)}. "
+      f"Available types: {sorted({d.type for d in OBJECT_SIZE_DISTRIBUTIONS})}"
+    )
+  return distributions
+
+
+def _sample_uniform_tuple(
+  rng: np.random.Generator,
+  low: tuple[float, ...],
+  high: tuple[float, ...],
+) -> tuple[float, ...]:
+  return tuple(float(v) for v in rng.uniform(low, high))
+
+
+def _sample_distribution_mesh_variants(
+  distribution_types: tuple[str, ...],
+  num_envs: int,
+  seed: int,
+  rollout_idx: int,
+) -> tuple[str, ...]:
+  distributions = _select_object_distributions(distribution_types)
+  rng = np.random.default_rng(seed)
+  names: list[str] = []
+  print(
+    "Sampling object mesh variants from distributions: " + ", ".join(distribution_types)
+  )
+  for env_idx in range(num_envs):
+    dist = distributions[int(rng.integers(0, len(distributions)))]
+    sampled_handle = _sample_uniform_tuple(
+      rng,
+      tuple(float(v) for v in dist.handle_min_lengths),
+      tuple(float(v) for v in dist.handle_max_lengths),
+    )
+    if dist.shape == "cylinder":
+      handle_lengths = (
+        sampled_handle[0],
+        sampled_handle[1],
+        sampled_handle[1],
+      )
+      shape = "cylinder"
+    else:
+      handle_lengths = (
+        sampled_handle[0],
+        sampled_handle[1],
+        sampled_handle[2],
+      )
+      shape = "box"
+    if dist.head_min_lengths is None or dist.head_max_lengths is None:
+      head_lengths = (0.0, 0.0, 0.0)
+      head_density = 0.0
+    else:
+      sampled_head = _sample_uniform_tuple(
+        rng,
+        tuple(float(v) for v in dist.head_min_lengths),
+        tuple(float(v) for v in dist.head_max_lengths),
+      )
+      head_lengths = (sampled_head[0], sampled_head[1], sampled_head[2])
+      assert dist.head_min_density is not None
+      assert dist.head_max_density is not None
+      head_density = float(rng.uniform(dist.head_min_density, dist.head_max_density))
+    handle_density = float(
+      rng.uniform(dist.handle_min_density, dist.handle_max_density)
+    )
+    name = (
+      f"sampled_rollout{rollout_idx}_env{env_idx}_{dist.type}_"
+      f"{'cylinder' if shape == 'cylinder' else 'cuboid'}"
+    )
+    names.append(
+      register_object_mesh_variant(
+        name=name,
+        shape=shape,
+        handle_lengths=handle_lengths,
+        head_lengths=head_lengths,
+        handle_density=handle_density,
+        head_density=head_density,
+      )
+    )
+    print(
+      f"  env={env_idx} type={dist.type} shape={shape} "
+      f"handle={np.array2string(np.asarray(handle_lengths), precision=4)} "
+      f"head={np.array2string(np.asarray(head_lengths), precision=4)} "
+      f"handle_density={handle_density:.1f} head_density={head_density:.1f}"
+    )
+  return tuple(names)
 
 
 def _make_env(
@@ -366,14 +477,26 @@ def _run_one(
   rollout_idx: int,
   args: argparse.Namespace,
 ) -> None:
+  object_mesh_variants = args.object_mesh_variants
+  object_mesh_variant_names = (
+    tuple(args.object_mesh_variant_names) if args.object_mesh_variant_names else None
+  )
+  if args.sample_object_distribution_types:
+    object_mesh_variants = True
+    object_mesh_variant_names = _sample_distribution_mesh_variants(
+      distribution_types=tuple(args.sample_object_distribution_types),
+      num_envs=args.num_envs,
+      seed=args.seed + rollout_idx,
+      rollout_idx=rollout_idx,
+    )
   env = _make_env(
     args.device,
     args.output_dir,
     args.steps,
     args.num_envs,
-    args.object_mesh_variants,
+    object_mesh_variants,
     args.success_tolerance,
-    tuple(args.object_mesh_variant_names) if args.object_mesh_variant_names else None,
+    object_mesh_variant_names,
   )
   try:
     obs, _ = env.reset(seed=args.seed + rollout_idx)

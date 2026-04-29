@@ -14,6 +14,7 @@ from mjlab.tasks.simtoolreal.assets import (
   get_iiwa_sharpa_spec,
   get_object_spec,
   get_table_spec,
+  register_object_mesh_variant,
 )
 from mjlab.tasks.simtoolreal.env_cfg import make_simtoolreal_env_cfg
 from mjlab.tasks.simtoolreal.mdp import N_ACT, N_OBS, N_STATE
@@ -218,6 +219,43 @@ def test_simtoolreal_simple_mesh_variants_assign_true_cuboids_and_cylinders() ->
     torch.testing.assert_close(
       state["handle_lengths"][:, 0],
       torch.full((4,), 0.18, device=env.device),
+    )
+  finally:
+    env.close()
+
+
+def test_simtoolreal_runtime_mesh_variant_registration_threads_to_mdp_state() -> None:
+  register_object_mesh_variant(
+    name="test_sampled_cylinder_variant",
+    shape="cylinder",
+    handle_lengths=(0.21, 0.045, 0.045),
+    head_lengths=(0.0, 0.0, 0.0),
+    handle_density=375.0,
+    head_density=0.0,
+  )
+  cfg = make_simtoolreal_env_cfg(
+    play=True,
+    object_mesh_variants=True,
+    object_mesh_variant_names=("test_sampled_cylinder_variant",),
+  )
+  cfg.scene.num_envs = 2
+
+  env = ManagerBasedRlEnv(cfg=cfg, device="cpu")
+  try:
+    env.reset(seed=17)
+    state = mdp._state(env)
+
+    assert state["handle_is_cylinder"].detach().cpu().tolist() == [True, True]
+    torch.testing.assert_close(
+      state["handle_lengths"],
+      torch.tensor(
+        [[0.21, 0.045, 0.045], [0.21, 0.045, 0.045]],
+        device=env.device,
+      ),
+    )
+    torch.testing.assert_close(
+      state["head_lengths"],
+      torch.zeros_like(state["head_lengths"]),
     )
   finally:
     env.close()

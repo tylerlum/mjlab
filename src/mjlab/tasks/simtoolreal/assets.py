@@ -128,10 +128,42 @@ SIMPLE_MESH_OBJECT_VARIANTS = (
   ),
 )
 ALL_MESH_OBJECT_VARIANTS = MESH_OBJECT_VARIANTS + SIMPLE_MESH_OBJECT_VARIANTS
+ObjectMeshVariant = tuple[
+  str,
+  str,
+  tuple[float, float, float],
+  tuple[float, float, float],
+  float,
+  float,
+]
 MESH_OBJECT_VARIANT_BY_NAME = {
   name: (name, shape, handle, head, handle_density, head_density)
   for name, shape, handle, head, handle_density, head_density in ALL_MESH_OBJECT_VARIANTS
 }
+
+
+def register_object_mesh_variant(
+  name: str,
+  shape: str,
+  handle_lengths: tuple[float, float, float],
+  head_lengths: tuple[float, float, float],
+  handle_density: float,
+  head_density: float,
+) -> str:
+  """Register a runtime object mesh variant for eval/capture jobs."""
+  if shape not in ("box", "cylinder"):
+    raise ValueError(f"Unsupported mesh variant shape: {shape}")
+  MESH_OBJECT_VARIANT_BY_NAME[name] = (
+    name,
+    shape,
+    tuple(float(v) for v in handle_lengths),
+    tuple(float(v) for v in head_lengths),
+    float(handle_density),
+    float(head_density),
+  )
+  return name
+
+
 FINGERTIP_LINK_NAMES = (
   "left_index_DP",
   "left_middle_DP",
