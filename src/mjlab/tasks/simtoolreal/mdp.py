@@ -12,7 +12,7 @@ from mjlab.envs.mdp import dr
 from mjlab.managers.action_manager import ActionTerm, ActionTermCfg
 from mjlab.managers.event_manager import RecomputeLevel, requires_model_fields
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.tasks.simtoolreal.assets import JOINT_NAMES, MESH_OBJECT_VARIANTS
+from mjlab.tasks.simtoolreal.assets import JOINT_NAMES, MESH_OBJECT_VARIANT_BY_NAME
 from mjlab.tasks.simtoolreal.object_size_distributions import (
   OBJECT_SIZE_DISTRIBUTIONS,
   ObjectSizeDistribution,
@@ -913,6 +913,7 @@ def set_handle_head_mesh_variant_state(
     raise RuntimeError("Object mesh variants are not enabled for this environment.")
 
   state = _state(env)
+  obj = _object(env)
   handle_lengths = torch.zeros((len(env_ids), 3), device=env.device)
   head_lengths = torch.zeros((len(env_ids), 3), device=env.device)
   masses = torch.zeros(len(env_ids), device=env.device)
@@ -920,14 +921,13 @@ def set_handle_head_mesh_variant_state(
   selected = variant_ids[env_ids]
   handle_densities = torch.zeros(len(env_ids), device=env.device)
   head_densities = torch.zeros(len(env_ids), device=env.device)
-  for idx, (
-    _name,
-    shape,
-    handle,
-    head,
-    handle_density,
-    head_density,
-  ) in enumerate(MESH_OBJECT_VARIANTS):
+  metadata = obj.variant_metadata
+  if metadata is None:
+    raise RuntimeError("Object mesh variants are not enabled for this environment.")
+  for idx, variant_name in enumerate(metadata.variant_names):
+    _name, shape, handle, head, handle_density, head_density = (
+      MESH_OBJECT_VARIANT_BY_NAME[variant_name]
+    )
     mask = selected == idx
     if not mask.any():
       continue

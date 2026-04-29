@@ -29,6 +29,7 @@ def make_simtoolreal_env_cfg(
   object_mesh_variants: bool = False,
   success_tolerance: float | None = None,
   object_distribution_types: tuple[str, ...] | None = None,
+  object_mesh_variant_names: tuple[str, ...] | None = None,
 ) -> ManagerBasedRlEnvCfg:
   """Create the SimToolReal KUKA+Sharpa training environment.
 
@@ -206,7 +207,7 @@ def make_simtoolreal_env_cfg(
       terrain=TerrainEntityCfg(terrain_type="plane"),
       entities={
         "robot": get_iiwa_sharpa_cfg(),
-        "object": get_object_mesh_variant_cfg()
+        "object": get_object_mesh_variant_cfg(object_mesh_variant_names)
         if object_mesh_variants
         else get_object_cfg(),
         "goal": get_goal_cfg(),

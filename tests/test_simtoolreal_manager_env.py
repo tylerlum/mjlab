@@ -191,6 +191,38 @@ def test_simtoolreal_object_distribution_types_config_threads_to_reset_event() -
   )
 
 
+def test_simtoolreal_simple_mesh_variants_assign_true_cuboids_and_cylinders() -> None:
+  cfg = make_simtoolreal_env_cfg(
+    play=True,
+    object_mesh_variants=True,
+    object_mesh_variant_names=("simple_cuboid", "simple_cylinder"),
+  )
+  cfg.scene.num_envs = 4
+
+  env = ManagerBasedRlEnv(cfg=cfg, device="cpu")
+  try:
+    env.reset(seed=13)
+    state = mdp._state(env)
+
+    assert env.sim.world_to_variant["object"].detach().cpu().tolist() == [0, 0, 1, 1]
+    assert state["handle_is_cylinder"].detach().cpu().tolist() == [
+      False,
+      False,
+      True,
+      True,
+    ]
+    torch.testing.assert_close(
+      state["head_lengths"],
+      torch.zeros_like(state["head_lengths"]),
+    )
+    torch.testing.assert_close(
+      state["handle_lengths"][:, 0],
+      torch.full((4,), 0.18, device=env.device),
+    )
+  finally:
+    env.close()
+
+
 def test_simtoolreal_object_uses_separate_handle_and_head_geoms() -> None:
   device = "cuda:0" if torch.cuda.is_available() else "cpu"
   cfg = load_env_cfg(TASK_ID, play=True)

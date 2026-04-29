@@ -153,6 +153,12 @@ def parse_args() -> argparse.Namespace:
     help="Use upstream MJLab per-world mesh variants for mixed cuboid/cylinder objects.",
   )
   parser.add_argument(
+    "--object-mesh-variant-names",
+    nargs="*",
+    default=None,
+    help="Optional subset of mesh variant names, e.g. simple_cuboid simple_cylinder.",
+  )
+  parser.add_argument(
     "--capture-all-envs",
     action="store_true",
     help="Write one HTML trajectory for every parallel env.",
@@ -183,12 +189,14 @@ def _make_env(
   num_envs: int,
   object_mesh_variants: bool,
   success_tolerance: float,
+  object_mesh_variant_names: tuple[str, ...] | None,
 ) -> SimToolRealViewerCaptureWrapper:
   env_cfg = (
     make_simtoolreal_env_cfg(
       play=True,
       object_mesh_variants=True,
       success_tolerance=success_tolerance,
+      object_mesh_variant_names=object_mesh_variant_names,
     )
     if object_mesh_variants
     else load_env_cfg(TASK_ID, play=True)
@@ -365,6 +373,7 @@ def _run_one(
     args.num_envs,
     args.object_mesh_variants,
     args.success_tolerance,
+    tuple(args.object_mesh_variant_names) if args.object_mesh_variant_names else None,
   )
   try:
     obs, _ = env.reset(seed=args.seed + rollout_idx)

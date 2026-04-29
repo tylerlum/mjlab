@@ -109,6 +109,29 @@ MESH_OBJECT_VARIANTS = (
     0.0,
   ),
 )
+SIMPLE_MESH_OBJECT_VARIANTS = (
+  (
+    "simple_cuboid",
+    "box",
+    (0.180, 0.050, 0.050),
+    (0.0, 0.0, 0.0),
+    450.0,
+    0.0,
+  ),
+  (
+    "simple_cylinder",
+    "cylinder",
+    (0.180, 0.050, 0.050),
+    (0.0, 0.0, 0.0),
+    450.0,
+    0.0,
+  ),
+)
+ALL_MESH_OBJECT_VARIANTS = MESH_OBJECT_VARIANTS + SIMPLE_MESH_OBJECT_VARIANTS
+MESH_OBJECT_VARIANT_BY_NAME = {
+  name: (name, shape, handle, head, handle_density, head_density)
+  for name, shape, handle, head, handle_density, head_density in ALL_MESH_OBJECT_VARIANTS
+}
 FINGERTIP_LINK_NAMES = (
   "left_index_DP",
   "left_middle_DP",
@@ -500,7 +523,14 @@ def get_object_cfg() -> EntityCfg:
   )
 
 
-def get_object_mesh_variant_cfg() -> VariantEntityCfg:
+def get_object_mesh_variant_cfg(
+  variant_names: tuple[str, ...] | None = None,
+) -> VariantEntityCfg:
+  selected_variants = (
+    MESH_OBJECT_VARIANTS
+    if variant_names is None
+    else tuple(MESH_OBJECT_VARIANT_BY_NAME[name] for name in variant_names)
+  )
   return VariantEntityCfg(
     variants={
       name: VariantCfg(
@@ -521,7 +551,7 @@ def get_object_mesh_variant_cfg() -> VariantEntityCfg:
         ),
         weight=1.0,
       )
-      for name, shape, handle, head, handle_density, head_density in MESH_OBJECT_VARIANTS
+      for name, shape, handle, head, handle_density, head_density in selected_variants
     },
     init_state=EntityCfg.InitialStateCfg(
       pos=(0.0, 0.0, 0.63),
