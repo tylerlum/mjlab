@@ -8,6 +8,7 @@ import torch
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.tasks.registry import list_tasks, load_env_cfg
 from mjlab.tasks.simtoolreal import mdp
+from mjlab.tasks.simtoolreal import policy as simtoolreal_policy
 from mjlab.tasks.simtoolreal.assets import ROBOT_URDF
 from mjlab.tasks.simtoolreal.env_cfg import make_simtoolreal_env_cfg
 from mjlab.tasks.simtoolreal.mdp import N_ACT, N_OBS, N_STATE
@@ -22,6 +23,20 @@ pytestmark = pytest.mark.skipif(
 
 def test_simtoolreal_task_registered() -> None:
   assert TASK_ID in list_tasks()
+
+
+def test_simtoolreal_pinky_limit_order_matches_policy_joint_order() -> None:
+  expected_lower = torch.tensor([0.0, -0.1745, -0.0349, 0.0, 0.0])
+  expected_upper = torch.tensor([0.2618, 1.5708, 0.0349, 1.7453, 1.3963])
+
+  torch.testing.assert_close(mdp.Q_LOWER[24:29], expected_lower)
+  torch.testing.assert_close(mdp.Q_UPPER[24:29], expected_upper)
+  torch.testing.assert_close(
+    torch.from_numpy(simtoolreal_policy.Q_LOWER[24:29]), expected_lower
+  )
+  torch.testing.assert_close(
+    torch.from_numpy(simtoolreal_policy.Q_UPPER[24:29]), expected_upper
+  )
 
 
 def test_simtoolreal_manager_env_reset_step_smoke() -> None:
