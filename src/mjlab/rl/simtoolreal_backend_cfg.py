@@ -99,6 +99,7 @@ def _simtoolreal_infos(
   env: Any,
   extras: dict,
   rew: torch.Tensor,
+  terminated: torch.Tensor,
   truncated: torch.Tensor,
 ) -> dict:
   """Build the SimToolReal info keys expected by the copied trainer code."""
@@ -114,6 +115,18 @@ def _simtoolreal_infos(
   closest_fingertip = _finite_progress(
     state["closest_fingertip_dist"], kin["fingertip_dist"]
   )
+  done = terminated | truncated
+  true_objective = state["true_objective"].detach().clone()
+  true_objective[done] = state["prev_episode_true_objective"][done]
+  closest_episode = state["prev_episode_closest_keypoint_max_dist"].detach().clone()
+  max_successes = float(
+    base_env.termination_manager.get_term_cfg("max_successes").params.get(
+      "max_consecutive_successes", 50
+    )
+  )
+  success_tolerance = float(
+    base_env.reward_manager.get_term_cfg("success").params.get("tolerance", 0.075)
+  )
 
   reward_terms = {}
   if hasattr(base_env.reward_manager, "active_terms"):
@@ -123,14 +136,21 @@ def _simtoolreal_infos(
   infos.update(
     {
       "time_outs": truncated,
-      "successes": state["successes"].detach().clone(),
-      "true_objective": state["successes"].detach().clone(),
-      "closest_keypoint_max_dist": closest_keypoint.detach().clone(),
+      "successes": state["prev_episode_successes"].detach().clone(),
+      "success_ratio": float(state["prev_episode_successes"].mean().item() / max_successes),
+      "all_goals_hit_ratio": float(
+        (state["prev_episode_successes"] >= max_successes).float().mean().item()
+      ),
+      "true_objective": true_objective,
+      "last_ep_true_objective": state["prev_episode_true_objective"].detach().clone(),
+      "closest_keypoint_max_dist": closest_episode,
+      "current_closest_keypoint_max_dist": closest_keypoint.detach().clone(),
       "closest_fingertip_dist": closest_fingertip.detach().clone(),
       "keypoint_max_dist": kin["keypoint_max_dist_fixed"].detach().clone(),
       "near_goal": state["near_goal"].float().detach().clone(),
       "near_goal_steps": state["near_goal_steps"].detach().clone(),
       "lifted_object": state["lifted_object"].float().detach().clone(),
+      "success_tolerance": success_tolerance,
       "reward": rew.detach().clone(),
       "episode_cumulative": {"reward": rew.detach().clone(), **reward_terms},
     }
@@ -172,7 +192,7 @@ class MjlabSimpleRlWrapper:
     self, actions: torch.Tensor
   ) -> tuple[dict[str, torch.Tensor], torch.Tensor, torch.Tensor, dict]:
     obs, rew, terminated, truncated, extras = self.env.step(actions.to(self.env.device))
-    infos = _simtoolreal_infos(self.env, extras, rew, truncated)
+    infos = _simtoolreal_infos(self.env, extras, rew, terminated, truncated)
     return self._obs_dict(obs), rew, terminated | truncated, infos
 
   def set_train_info(self, env_frames: int, *args, **kwargs) -> None:
@@ -227,7 +247,7 @@ class MjlabRlGamesVecEnv:
     obs, rew, terminated, truncated, extras = self.unwrapped.step(
       actions.to(self.unwrapped.device)
     )
-    infos = _simtoolreal_infos(self.unwrapped, extras, rew, truncated)
+    infos = _simtoolreal_infos(self.unwrapped, extras, rew, terminated, truncated)
     return self._obs_dict(obs), rew, terminated | truncated, infos
 
   def get_env_info(self) -> dict:

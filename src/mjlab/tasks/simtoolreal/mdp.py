@@ -151,13 +151,14 @@ Q_UPPER = torch.tensor(
 
 def _state(env: ManagerBasedRlEnv) -> dict[str, torch.Tensor]:
   if not hasattr(env, "_simtoolreal_state"):
+    default_handle_lengths = torch.tensor(
+      [0.15, 0.025, 0.025], device=env.device, dtype=torch.float32
+    )
     env._simtoolreal_state = {  # type: ignore[attr-defined]
-      "object_scales": torch.tensor(
-        [5.0, 0.75, 0.75], device=env.device, dtype=torch.float32
-      ).repeat(env.num_envs, 1),
-      "handle_lengths": torch.tensor(
-        [0.15, 0.025, 0.025], device=env.device, dtype=torch.float32
-      ).repeat(env.num_envs, 1),
+      "object_scales": (default_handle_lengths / OBJECT_BASE_SIZE).repeat(
+        env.num_envs, 1
+      ),
+      "handle_lengths": default_handle_lengths.repeat(env.num_envs, 1),
       "head_lengths": torch.tensor(
         [0.05, 0.05, 0.03], device=env.device, dtype=torch.float32
       ).repeat(env.num_envs, 1),
@@ -179,6 +180,17 @@ def _state(env: ManagerBasedRlEnv) -> dict[str, torch.Tensor]:
       "reset_goal_buf": torch.zeros(env.num_envs, device=env.device, dtype=torch.bool),
       "successes": torch.zeros(env.num_envs, device=env.device),
       "prev_episode_successes": torch.zeros(env.num_envs, device=env.device),
+      "true_objective": torch.zeros(env.num_envs, device=env.device),
+      "prev_episode_true_objective": torch.zeros(env.num_envs, device=env.device),
+      "prev_total_episode_closest_keypoint_max_dist": torch.zeros(
+        env.num_envs, device=env.device
+      ),
+      "total_episode_closest_keypoint_max_dist": torch.zeros(
+        env.num_envs, device=env.device
+      ),
+      "prev_episode_closest_keypoint_max_dist": torch.full(
+        (env.num_envs,), 1000.0, device=env.device
+      ),
       "lifted_object": torch.zeros(env.num_envs, device=env.device, dtype=torch.bool),
       "just_lifted_object": torch.zeros(
         env.num_envs, device=env.device, dtype=torch.bool
@@ -380,6 +392,66 @@ def cache_prev_targets(env: ManagerBasedRlEnv, env_ids: torch.Tensor | None) -> 
     term.prev_targets[:] = term.targets
 
 
+def _current_success_tolerance(
+  env: ManagerBasedRlEnv, default_tolerance: float = 0.075
+) -> float:
+  if hasattr(env, "reward_manager"):
+    try:
+      return float(env.reward_manager.get_term_cfg("success").params["tolerance"])
+    except (AttributeError, KeyError):
+      pass
+  return default_tolerance
+
+
+def _tolerance_successes_objective(
+  success_tolerance: float,
+  successes: torch.Tensor,
+  initial_tolerance: float = 0.075,
+  target_tolerance: float = 0.01,
+) -> torch.Tensor:
+  """Match SimToolReal's PBT/SAPG objective helper."""
+  if initial_tolerance > target_tolerance:
+    tolerance_objective = (initial_tolerance - success_tolerance) / (
+      initial_tolerance - target_tolerance
+    )
+  else:
+    tolerance_objective = 1.0
+  if success_tolerance > target_tolerance:
+    return successes * 0.01 + tolerance_objective
+  return successes + tolerance_objective
+
+
+def _update_true_objective(
+  env: ManagerBasedRlEnv,
+  initial_tolerance: float = 0.075,
+  target_tolerance: float = 0.01,
+) -> None:
+  state = _state(env)
+  state["true_objective"][:] = _tolerance_successes_objective(
+    _current_success_tolerance(env, initial_tolerance),
+    state["successes"],
+    initial_tolerance=initial_tolerance,
+    target_tolerance=target_tolerance,
+  )
+
+
+def _record_goal_progress(env: ManagerBasedRlEnv, env_ids: torch.Tensor) -> None:
+  """Store per-goal closest-keypoint stats before resampling a goal.
+
+  IsaacGym uses ``-1`` as the uninitialized sentinel. MJLab uses ``inf`` so reward
+  deltas are never accidentally infinite; finite checks below preserve the same
+  first-sample/empty-goal behavior.
+  """
+  state = _state(env)
+  closest = state["closest_keypoint_max_dist"][env_ids]
+  state["prev_total_episode_closest_keypoint_max_dist"][env_ids] = state[
+    "total_episode_closest_keypoint_max_dist"
+  ][env_ids]
+  state["total_episode_closest_keypoint_max_dist"][env_ids] += torch.where(
+    torch.isfinite(closest), closest, torch.zeros_like(closest)
+  )
+
+
 def reset_simtoolreal_state(
   env: ManagerBasedRlEnv, env_ids: torch.Tensor | None
 ) -> None:
@@ -393,8 +465,19 @@ def reset_simtoolreal_state(
   state["near_goal"][env_ids] = False
   state["near_goal_steps"][env_ids] = 0.0
   state["reset_goal_buf"][env_ids] = False
+  state["prev_episode_true_objective"][env_ids] = state["true_objective"][env_ids]
+  prev_successes = state["successes"][env_ids].clone()
   state["prev_episode_successes"][env_ids] = state["successes"][env_ids]
+  state["prev_episode_closest_keypoint_max_dist"][env_ids] = torch.where(
+    prev_successes > 0,
+    state["prev_total_episode_closest_keypoint_max_dist"][env_ids]
+    / prev_successes.clamp_min(1.0),
+    state["total_episode_closest_keypoint_max_dist"][env_ids],
+  )
+  state["total_episode_closest_keypoint_max_dist"][env_ids] = 0.0
+  state["prev_total_episode_closest_keypoint_max_dist"][env_ids] = 0.0
   state["successes"][env_ids] = 0.0
+  state["true_objective"][env_ids] = 0.0
   state["lifted_object"][env_ids] = False
   state["just_lifted_object"][env_ids] = False
   state["rb_forces"][env_ids] = 0.0
@@ -407,7 +490,19 @@ def reset_simtoolreal_state(
   state["random_ang_vel_impulse_prob"][env_ids] = _log_uniform(
     env, 0.001, 0.1, (len(env_ids),)
   )
-  state["object_state_queue"] = None
+  queue = state.get("object_state_queue")
+  if queue is not None:
+    obj = _object(env)
+    pose_vel = torch.cat(
+      [
+        obj.data.root_link_pos_w,
+        obj.data.root_link_quat_w,
+        obj.data.root_link_lin_vel_w,
+        obj.data.root_link_ang_vel_w,
+      ],
+      dim=-1,
+    )
+    queue[env_ids] = pose_vel[env_ids, None, :].repeat(1, queue.shape[1], 1)
 
 
 @requires_model_fields("body_pos", recompute=RecomputeLevel.set_const_0)
@@ -1191,6 +1286,7 @@ def update_success_state(
   is_success = state["near_goal_steps"] >= steps
   state["successes"] += is_success.float()
   state["reset_goal_buf"] |= is_success
+  _update_true_objective(env)
   return torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
 
 
@@ -1208,6 +1304,7 @@ def reset_successful_goals(
   state["reset_goal_buf"] &= state["successes"] >= max_consecutive_successes
   if len(reset_goal_env_ids) == 0:
     return
+  _record_goal_progress(env, reset_goal_env_ids)
   reset_goal_uniform(env, reset_goal_env_ids, is_first_goal=False)
   state["reset_goal_buf"][reset_goal_env_ids] = False
   state["near_goal"][reset_goal_env_ids] = False
@@ -1239,6 +1336,19 @@ def object_fell(env: ManagerBasedRlEnv) -> torch.Tensor:
   return _object(env).data.root_link_pos_w[:, 2] < 0.1
 
 
+def object_dropped_after_lift(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """Reset when a lifted object falls back below its reset height.
+
+  This mirrors SimToolReal's ``resetWhenDropped`` branch: once the object has
+  crossed the lift threshold, dropping below ``object_init_state[:, 2]`` ends the
+  episode even though the object may still be well above the hard 0.1 m fall
+  threshold.
+  """
+  state = _state(env)
+  object_z = _object(env).data.root_link_pos_w[:, 2]
+  return state["lifted_object"] & (object_z < state["initial_object_z"])
+
+
 def hand_far_from_object(
   env: ManagerBasedRlEnv, threshold: float = 1.5
 ) -> torch.Tensor:
@@ -1265,6 +1375,46 @@ def max_consecutive_successes_reached(
   max_consecutive_successes: int = 50,
 ) -> torch.Tensor:
   return _state(env)["successes"] >= max_consecutive_successes
+
+
+def success_tolerance_curriculum(
+  env: ManagerBasedRlEnv,
+  env_ids: torch.Tensor | slice | None,
+  initial_tolerance: float = 0.075,
+  target_tolerance: float = 0.01,
+  curriculum_increment: float = 0.9,
+  curriculum_interval: int = 3000,
+  min_mean_successes: float = 3.0,
+) -> dict[str, float]:
+  """Mirror SimToolReal's tolerance curriculum for train runs."""
+  del env_ids
+  state = _state(env)
+  last_update = int(state.get("last_tolerance_curriculum_update", 0))
+  reward_cfg = env.reward_manager.get_term_cfg("success")
+  termination_cfg = env.termination_manager.get_term_cfg("success_update")
+  tolerance = float(reward_cfg.params["tolerance"])
+  if env.common_step_counter - last_update < curriculum_interval:
+    return {
+      "success_tolerance": tolerance,
+      "mean_successes": float(state["prev_episode_successes"].mean().item()),
+    }
+  mean_successes = float(state["prev_episode_successes"].mean().item())
+  if mean_successes < min_mean_successes:
+    return {
+      "success_tolerance": tolerance,
+      "mean_successes": mean_successes,
+    }
+
+  tolerance *= curriculum_increment
+  tolerance = min(tolerance, initial_tolerance)
+  tolerance = max(tolerance, target_tolerance)
+  reward_cfg.params["tolerance"] = tolerance
+  termination_cfg.params["tolerance"] = tolerance
+  env.cfg.rewards["success"].params["tolerance"] = tolerance
+  env.cfg.terminations["success_update"].params["tolerance"] = tolerance
+  _update_true_objective(env, initial_tolerance, target_tolerance)
+  state["last_tolerance_curriculum_update"] = env.common_step_counter
+  return {"success_tolerance": tolerance, "mean_successes": mean_successes}
 
 
 def apply_random_object_perturbations(

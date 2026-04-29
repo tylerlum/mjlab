@@ -102,10 +102,17 @@ def test_simtoolreal_alt_wrappers_emit_finite_task_infos() -> None:
 
     simple = MjlabSimpleRlWrapper(env)
     _, _, _, simple_infos = simple.step(action)
-    assert {"successes", "true_objective", "closest_keypoint_max_dist"} <= set(
-      simple_infos
-    )
+    assert {
+      "successes",
+      "success_ratio",
+      "all_goals_hit_ratio",
+      "true_objective",
+      "closest_keypoint_max_dist",
+      "current_closest_keypoint_max_dist",
+      "success_tolerance",
+    } <= set(simple_infos)
     assert torch.isfinite(simple_infos["closest_keypoint_max_dist"]).all()
+    assert torch.isfinite(simple_infos["current_closest_keypoint_max_dist"]).all()
     assert torch.isfinite(simple_infos["closest_fingertip_dist"]).all()
     assert "episode_cumulative" in simple_infos
     assert "reward" in simple_infos["episode_cumulative"]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp import reset_scene_to_default, time_out
+from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
@@ -171,6 +172,7 @@ def make_simtoolreal_env_cfg(
   terminations = {
     "time_out": TerminationTermCfg(func=time_out, time_out=True),
     "object_fell": TerminationTermCfg(func=mdp.object_fell),
+    "object_dropped_after_lift": TerminationTermCfg(func=mdp.object_dropped_after_lift),
     "hand_far_from_object": TerminationTermCfg(func=mdp.hand_far_from_object),
     "success_update": TerminationTermCfg(
       func=mdp.update_success_state,
@@ -181,6 +183,18 @@ def make_simtoolreal_env_cfg(
       params={"max_consecutive_successes": 50},
     ),
   }
+  curriculum = {}
+  if not play:
+    curriculum["success_tolerance"] = CurriculumTermCfg(
+      func=mdp.success_tolerance_curriculum,
+      params={
+        "initial_tolerance": 0.075,
+        "target_tolerance": 0.01,
+        "curriculum_increment": 0.9,
+        "curriculum_interval": 3000,
+        "min_mean_successes": 3.0,
+      },
+    )
 
   return ManagerBasedRlEnvCfg(
     scene=SceneCfg(
@@ -208,6 +222,7 @@ def make_simtoolreal_env_cfg(
     events=events,
     rewards=rewards,
     terminations=terminations,
+    curriculum=curriculum,
     viewer=ViewerConfig(
       origin_type=ViewerConfig.OriginType.ASSET_BODY,
       entity_name="robot",
@@ -222,7 +237,7 @@ def make_simtoolreal_env_cfg(
       nconmax=256,
       njmax=1024,
       mujoco=MujocoCfg(
-        timestep=1.0 / 120.0,
+        timestep=1.0 / 180.0,
         integrator="implicitfast",
         cone="elliptic",
         impratio=10.0,
@@ -230,7 +245,7 @@ def make_simtoolreal_env_cfg(
         ls_iterations=20,
       ),
     ),
-    decimation=2,
+    decimation=3,
     episode_length_s=1.0e9 if play else 10.0,
     scale_rewards_by_dt=False,
   )

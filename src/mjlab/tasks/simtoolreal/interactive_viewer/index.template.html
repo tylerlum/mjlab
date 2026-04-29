@@ -75,7 +75,7 @@
 
       #controls {
         display: grid;
-        grid-template-columns: auto auto auto minmax(160px, 1fr) auto;
+        grid-template-columns: auto auto auto auto minmax(160px, 1fr) auto;
         gap: 10px;
         align-items: center;
       }
@@ -187,6 +187,7 @@
           <button id="play-pause" type="button">Play</button>
           <button id="loop-toggle" type="button">Loop: On</button>
           <button id="reset" type="button">Reset</button>
+          <button id="axes-toggle" type="button">Axes: Off</button>
           <input id="timeline" type="range" min="0" max="0" value="0" step="1" />
           <div id="status">t = 0.00s</div>
         </div>
@@ -212,6 +213,7 @@
       const playPauseButton = document.getElementById("play-pause");
       const loopToggleButton = document.getElementById("loop-toggle");
       const resetButton = document.getElementById("reset");
+      const axesToggleButton = document.getElementById("axes-toggle");
       const timelineEl = document.getElementById("timeline");
       const statusEl = document.getElementById("status");
       const frameMetaEl = document.getElementById("frame-meta");
@@ -315,9 +317,11 @@
 
       let animatedRobot = null;
       const sceneRobots = new Map();
+      const frameAxes = [];
       let currentFrame = 0;
       let isPlaying = true;
       let isLooping = true;
+      let showFrameAxes = false;
       let playbackStartTimeMs = 0;
       let playbackStartFrame = 0;
 
@@ -400,6 +404,14 @@
       function setLooping(nextLooping) {
         isLooping = nextLooping;
         loopToggleButton.textContent = isLooping ? "Loop: On" : "Loop: Off";
+      }
+
+      function setFrameAxesVisible(nextVisible) {
+        showFrameAxes = nextVisible;
+        axesToggleButton.textContent = showFrameAxes ? "Axes: On" : "Axes: Off";
+        frameAxes.forEach((axis) => {
+          axis.visible = showFrameAxes;
+        });
       }
 
       function applyColorOverride(root, colorOverride) {
@@ -575,6 +587,17 @@
         setLooping(!isLooping);
       });
 
+      axesToggleButton.addEventListener("click", () => {
+        setFrameAxesVisible(!showFrameAxes);
+      });
+
+      window.addEventListener("keydown", (event) => {
+        if (event.key === "x" || event.key === "X") {
+          setFrameAxesVisible(!showFrameAxes);
+          event.preventDefault();
+        }
+      });
+
       resetButton.addEventListener("click", resetPlayback);
       timelineEl.addEventListener("input", (event) => {
         setPlaying(false);
@@ -631,6 +654,13 @@
               const robot = await loadRobot(robotConfig);
               sceneRobots.set(robotConfig.name, robot);
 
+              if (robotConfig.name === "object" || robotConfig.name === "goal") {
+                const axis = new THREE.AxesHelper(0.16);
+                axis.visible = showFrameAxes;
+                robot.add(axis);
+                frameAxes.push(axis);
+              }
+
               if (robotConfig.animated) {
                 if (animatedRobot) {
                   throw new Error("Only one animated robot is supported in this prototype.");
@@ -647,6 +677,7 @@
 
           applyFrame(0);
           setLooping(true);
+          setFrameAxesVisible(false);
           setPlaying(true);
           requestAnimationFrame(animate);
         } catch (error) {

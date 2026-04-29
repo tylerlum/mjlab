@@ -70,7 +70,7 @@ DEFAULT_JOINT_POS = {
   ".*": 0.0,
 }
 
-DEFAULT_ASSET_FRICTION = 0.5
+DEFAULT_ASSET_FRICTION = 1.0
 FINGERTIP_FRICTION = 1.5
 DEFAULT_GEOM_FRICTION = (DEFAULT_ASSET_FRICTION, 0.005, 0.0001)
 FINGERTIP_GEOM_FRICTION = (FINGERTIP_FRICTION, 0.005, 0.0001)
@@ -273,12 +273,17 @@ def _apply_robot_friction_overrides(spec: mujoco.MjSpec) -> None:
   """Mirror SimToolReal's default/fingertip asset friction split on URDF geoms."""
   fingertip_meshes = set(FINGERTIP_LINK_NAMES) | set(FINGERTIP_MESH_NAMES)
   for geom in spec.geoms:
-    friction = (
-      FINGERTIP_GEOM_FRICTION
-      if geom.meshname in fingertip_meshes
-      else DEFAULT_GEOM_FRICTION
-    )
+    is_fingertip = geom.meshname in fingertip_meshes
+    friction = FINGERTIP_GEOM_FRICTION if is_fingertip else DEFAULT_GEOM_FRICTION
     geom.friction = friction
+    if is_fingertip:
+      geom.condim = 6
+
+
+def _apply_robot_gravity_compensation(spec: mujoco.MjSpec) -> None:
+  """Apply body-level MuJoCo gravity compensation to the robot only."""
+  for body in spec.bodies[1:]:
+    body.gravcomp = 1.0
 
 
 def _prepare_robot_mesh_cache() -> Path:
@@ -328,6 +333,7 @@ def get_iiwa_sharpa_spec() -> mujoco.MjSpec:
   spec.modelfiledir = str(_prepare_robot_mesh_cache())
   _resolve_robot_mesh_paths(spec)
   _apply_robot_friction_overrides(spec)
+  _apply_robot_gravity_compensation(spec)
   return spec
 
 
