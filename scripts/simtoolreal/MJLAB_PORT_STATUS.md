@@ -51,6 +51,14 @@ The current manager env uses:
 - Table friction: `1 0.005 0.0001`.
 - Object/table/fingertip-relevant contact dimensionality: `condim=6`.
 
+These contact settings intentionally follow the working
+`simtoolreal.github.io` MuJoCo/WASM demo more closely than plain MuJoCo defaults.
+The important non-default choices are elliptic cones, 6D contact, higher table
+friction, `impratio > 1`, and a non-trivial solver iteration count. Early
+weaker/default-ish contact setups were easier to make run, but they were risky:
+the object could look like it was sinking into the table or become unstable once
+the robot applied force.
+
 The capture script can override timing for experiments:
 
 ```bash
@@ -71,6 +79,30 @@ so browser timing is about 58.8 Hz, not exactly 60 Hz. The capture script has:
 ```
 
 for this browser-timing comparison.
+
+### Physics Timestep Tradeoff
+
+There are three timing regimes that matter:
+
+- **60 Hz policy dt** is non-negotiable for the pretrained policy and should
+  stay fixed unless intentionally testing out-of-distribution behavior.
+- **`1/180` physics dt with decimation `3`** is the current MJLab default. It is
+  much cheaper than 1 kHz-class physics and matches the style of other
+  vectorized MJLab tasks better.
+- **`1/900` physics dt with decimation `15`** is useful for fidelity/debug
+  rollouts because it is closer to the 1 ms website MuJoCo demo while preserving
+  exactly 60 Hz policy updates.
+
+The website's native `0.001` dt with decimation `17` is also worth testing, but
+it runs the policy at about 58.8 Hz. This is not exactly the pretrained policy's
+training cadence. For strict policy reproduction, prefer exact 60 Hz control;
+for website parity debugging, browser timing is a useful comparison.
+
+Open question: we do not yet know whether `1/180` is sufficient for final
+training. It is probably the right throughput default, but if the robot can
+drive the object through the table, if round handles jitter badly, or if success
+transfer remains noticeably below the website/MuJoCo reference, re-running
+training/eval at `1/900` should be one of the first ablations.
 
 ## Robot Details
 
@@ -106,12 +138,20 @@ There are two object paths:
    - Uses per-world `geom_size` and `geom_pos`.
    - Good for cuboid-equivalent randomization.
    - Cannot switch MuJoCo primitive `geom_type` per world.
+   - Safest fallback if heterogeneous variants remain unstable: train on
+     all-cuboid tool objects with different per-env scales, offsets, densities,
+     COM, and inertia. This gives up round-handle geometry but keeps native
+     MuJoCo box collision.
 
 2. **Heterogeneous mesh-variant path**
    - Uses MJLab per-world mesh variants.
    - Allows different envs to use different cuboid/cylinder/capsule-like object
      meshes in one vectorized env.
    - Current sampled rollout path uses this.
+   - Needed today for mixed cuboid and round-handle objects in one vectorized
+     env.
+   - These are mesh variants representing primitive-like shapes, not actual
+     MuJoCo primitive `box/cylinder/capsule` geoms switched per env.
 
 The source object size distributions were copied from SimToolReal:
 
@@ -128,6 +168,28 @@ IsaacGym distributions:
 
 The sampled dimensions and densities are printed before the env is built, and
 the generated variants are registered at runtime.
+
+The distinction between "primitive object" and "mesh version of a primitive" is
+important:
+
+- Native primitives give robust primitive contacts and simple inertias, but
+  `geom_type` is model-global and currently cannot be changed independently for
+  each world in the vectorized model.
+- Mesh variants let us choose a different object per world, but the geometry is
+  compiled as a mesh. That means mass, COM, and inertia must be assigned
+  explicitly, and contact stability needs empirical checks.
+
+Because of that, there are three realistic training options:
+
+1. Use all-cuboid objects with per-env primitive `geom_size` scaling. This is
+   the most conservative physics path and may be the best first stable training
+   baseline.
+2. Use heterogeneous mesh variants for cuboid and round-handle objects, with
+   explicit density-derived mass/COM/inertia. This is closer to SimToolReal's
+   object distribution but riskier numerically.
+3. Use a fixed website-style object for pretrained-policy debugging only. This
+   is useful for single-object parity checks but is not the full training
+   distribution.
 
 ### Cylinder vs Capsule
 
@@ -165,6 +227,12 @@ path because MuJoCo `geom_type` is model-global, not per-world. A cleaner future
 design could use several fixed primitive slots and per-world activation/contact
 masks if MJLab/Warp supports the required fields.
 
+Capsules are probably the better round-handle default for SimToolReal parity.
+They match IsaacGym's `replace_cylinder_with_capsule=True` behavior and usually
+avoid the sharper cylinder rim contact that can make table/hand interaction more
+brittle. The caveat is that in the current heterogeneous path they are
+capsule-shaped meshes, not native capsule geoms.
+
 ### Mass, COM, And Inertia
 
 Mesh-derived inertias were not good enough for SimToolReal parity. The MDP now
@@ -179,6 +247,28 @@ randomization path. This was important: an earlier version updated MDP state and
 goal geometry but accidentally left `body_mass/body_inertia` close to
 mesh-derived values.
 
+This is a major gotcha. It is possible for all the high-level task metadata to
+look correct while the actual MuJoCo/Warp model is still integrating the wrong
+rigid body. For example, the observation can report the intended handle/head
+scale and density-derived mass, and the reward can use the intended keypoints,
+while the physics still uses mesh-generated inertia unless the model arrays are
+overwritten.
+
+Current intended behavior:
+
+- Sample handle/head dimensions from the SimToolReal object distribution.
+- Sample handle/head densities from the same distribution logic.
+- Compute handle mass and head mass from their volumes and sampled densities.
+- Compute the composite COM from the handle/head masses and offsets.
+- Compute the composite inertia about the composite COM.
+- Write those values into MJLab/MuJoCo per-world model fields:
+  `body_mass`, `body_ipos`, and `body_inertia`.
+
+This is especially important for round handles because the mesh shape, the
+IsaacGym capsule replacement, and the inertia helper can otherwise disagree. The
+policy is sensitive to rotational dynamics, so "looks right in the viewer" is
+not sufficient.
+
 Sanity check after the fix showed exact agreement, to displayed precision, for:
 
 ```text
@@ -190,6 +280,15 @@ box handle + box head
 
 The check compared actual MJLab `env.sim.model.body_mass/body_ipos/body_inertia`
 against closed-form mass, COM, and inertia formulas.
+
+This should become a regression test before serious training runs. The test
+should cover at least:
+
+- simple cuboid,
+- simple cylinder distribution represented as capsule inertia,
+- simple cylinder distribution represented as cylinder-like collision mesh,
+- website demo handle/head object,
+- multiple envs with different sampled objects in one vectorized model.
 
 ## Website Demo Object
 
@@ -214,6 +313,11 @@ geometry and scale:
 Matching this object alone did not close the performance gap with the website
 demo, which suggests remaining differences are elsewhere: robot XML/URDF,
 actuation, contact, viewer/control path, or reset/goal details.
+
+The website object is useful because it isolates many distribution issues, but
+it can hide training-distribution bugs. A policy looking good on this fixed
+object does not prove that per-env scaling, density sampling, keypoint reward,
+or heterogeneous object assignment are correct.
 
 ## Observations And Actions
 
@@ -402,6 +506,19 @@ HTML object rendering approximates round/capsule handles as cylinders unless we
 add mesh-embedded object visuals for the viewer export. The MJLab physics can
 use capsule-shaped meshes, but the HTML visual may not show the rounded caps.
 
+Another caveat: HTML export is a diagnostic view of captured MJLab states. It is
+not itself the physics engine. If an object appears slightly sunk or offset in
+HTML, check both possibilities:
+
+- the underlying MJLab/Warp state really has a contact/pose issue,
+- the standalone viewer export approximated the physics geometry or origin
+  incorrectly.
+
+For goal/object origin debugging, enable object and goal frame axes in the
+viewer. The desired convention is that the object body origin is at the handle
+center, not at the head center and not at the combined visual bounding-box
+center.
+
 ## Important Gotchas
 
 ### Mesh Variants Are Not Primitive Variants
@@ -410,6 +527,20 @@ MJLab's heterogeneous object path varies mesh data per world. It does not vary
 MuJoCo `geom_type` per world. Attempting to directly use primitive capsule slots
 inside the mesh-variant path caused variant compilation problems. For now, use
 mesh-shaped capsule/cylinder variants.
+
+This means "different meshes per env" and "different native primitive types per
+env" are different capabilities. The branch currently has the former. It should
+not be assumed that a capsule-like mesh has exactly the same collision behavior
+as a native capsule geom.
+
+If training is unstable, the recommended fallback is:
+
+```text
+all-cuboid handle/head objects + per-env primitive scaling + explicit density-derived inertia
+```
+
+That would still exercise object size randomization and fixed-size keypoint
+reward logic while avoiding mesh-variant contact complexity.
 
 ### Density Can Reach Metadata Without Reaching Physics
 
@@ -446,6 +577,19 @@ suspects include robot XML vs URDF details, actuator implementation, contact
 model differences between MuJoCo native WASM and MuJoCo/Warp, reset/goal
 distribution details, and object visual-vs-physics mismatch in the HTML export.
 
+The most concrete stability observations so far:
+
+- GPU/Warp can generate useful 4-env website-object HTML rollouts quickly.
+- A 1000-step GPU website-object rollout went non-finite around step 884 in one
+  test after the inertia fix. A 700-step rollout completed and produced HTML.
+- CPU/Warp for this scene is not practical for quick visual checks: even a
+  50-step 4-env capture spent a long time in `mjwarp.step()` solver/contact code
+  before being interrupted.
+
+This means most current viewer artifacts have effectively been GPU physics
+artifacts. CPU-vs-GPU comparison remains open, but the CPU path is too slow to
+use casually for 4-env HTML captures.
+
 ## Verification Commands
 
 Focused tests:
@@ -471,4 +615,3 @@ tests/test_simtoolreal_manager_env.py tests/test_simtoolreal_policy.py: 22 passe
 
 The inertia sanity check was run as an ad hoc script and should be promoted into
 a focused regression test if we continue iterating on object variants.
-
